@@ -127,6 +127,11 @@ document.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   renderTable();
   updateStats();
+  renderBackupStatus();
+  renderDataAlerts();
+  document.getElementById('dataAlertBar').addEventListener('click', onDataAlertClick);
+  document.getElementById('btnBackupNow').addEventListener('click', exportBackupJson);
+  setInterval(renderBackupStatus, 60000); // 每分鐘重新評估是否逾 24 小時
 });
 
 // 時鐘功能
@@ -164,29 +169,153 @@ function formatCurrentDateTime(dateObj = new Date()) {
   return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 
+// 儲存層（backup-core.js 提供；行為與原本一致，僅抽象化以利測試）
+const recordStore = MailBackupCore.createStore({ storage: window.localStorage, key: STORAGE_KEY });
+const corruptStash = MailBackupCore.createCorruptStash({ storage: window.localStorage });
+
+// 資料安全警示（持續顯示直到問題排除）
+const dataAlerts = { saveFail: null, corrupt: null };
+let saveLocked = false;   // 損毀原文尚未保存/下載前，暫停寫入以免覆蓋
+let corruptRaw = null;    // 讀到的損毀原文
+
 // 讀取 LocalStorage 資料
 function loadRecords() {
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (data) {
-      records = JSON.parse(data);
-    } else {
-      records = [];
-    }
-  } catch (err) {
-    console.error('讀取資料失敗：', err);
-    records = [];
+  const result = recordStore.load();
+  if (result.status === 'corrupt') {
+    console.error('讀取資料失敗：', result.error);
+    handleCorruptLoad(result);
   }
+  records = result.records;
+}
+
+// 讀到損毀資料：先另存原文，避免之後的儲存直接蓋掉可搶救的內容
+function handleCorruptLoad(result) {
+  corruptRaw = result.raw;
+  if (result.raw === null) {
+    dataAlerts.corrupt = {
+      message: '❗ 無法讀取瀏覽器儲存空間，系統內的紀錄暫時看不到。請勿重複登記，請檢查瀏覽器設定（無痕模式／封鎖網站資料）後重新整理，或使用「還原備份」。',
+      actions: []
+    };
+    return;
+  }
+  const st = corruptStash.stash(result.raw);
+  if (st.ok) {
+    dataAlerts.corrupt = {
+      message: '❗ 偵測到已損毀的紀錄資料，系統已另存原文，目前畫面為空白。請盡快使用「還原備份」載入最近一次備份，並建議下載損毀原文交給管理者。',
+      actions: [{ id: 'downloadCorrupt', label: '下載損毀原文' }, { id: 'dismissCorrupt', label: '我知道了' }]
+    };
+  } else {
+    saveLocked = true;
+    dataAlerts.corrupt = {
+      message: '❗ 偵測到已損毀的紀錄資料，但無法另存原文（資料過大或儲存空間不足）。為避免覆蓋，系統已暫停寫入。請先下載損毀原文，再使用「還原備份」。',
+      actions: [{ id: 'downloadCorrupt', label: '下載損毀原文並解除暫停' }]
+    };
+  }
+}
+
+function downloadCorruptRaw() {
+  if (corruptRaw === null) return;
+  const blob = new Blob([corruptRaw], { type: 'text/plain;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `美和科技大學收發室_損毀資料原文_${formatCurrentDateTime().replace(/[-: ]/g, '').slice(0, 12)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  saveLocked = false;
+  if (dataAlerts.corrupt) {
+    dataAlerts.corrupt.actions = [{ id: 'downloadCorrupt', label: '再次下載損毀原文' }, { id: 'dismissCorrupt', label: '我知道了' }];
+    dataAlerts.corrupt.message = '❗ 損毀原文已下載。請盡快使用「還原備份」載入最近一次備份。';
+  }
+  renderDataAlerts();
+  showToast('損毀原文已下載，已解除暫停寫入。', 'info');
+}
+
+function renderDataAlerts() {
+  const box = document.getElementById('dataAlertBar');
+  if (!box) return;
+  box.innerHTML = '';
+  Object.keys(dataAlerts).forEach(k => {
+    const al = dataAlerts[k];
+    if (!al) return;
+    const item = document.createElement('div');
+    item.className = 'data-alert-item';
+    item.setAttribute('role', 'alert');
+    const msg = document.createElement('div');
+    msg.className = 'data-alert-message';
+    msg.textContent = al.message;
+    item.appendChild(msg);
+    al.actions.forEach(act => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-outline data-alert-btn';
+      btn.dataset.alertAction = act.id;
+      btn.textContent = act.label;
+      item.appendChild(btn);
+    });
+    box.appendChild(item);
+  });
+}
+
+function onDataAlertClick(e) {
+  const btn = e.target.closest('[data-alert-action]');
+  if (!btn) return;
+  const act = btn.dataset.alertAction;
+  if (act === 'emergency') downloadBackupFile('美和科技大學收發室_緊急備份');
+  else if (act === 'downloadCorrupt') downloadCorruptRaw();
+  else if (act === 'dismissCorrupt') { dataAlerts.corrupt = null; renderDataAlerts(); }
+}
+
+// 儲存失敗：明確警告，保留畫面資料並提供緊急匯出
+function reportSaveFailure(message) {
+  const firstTime = !dataAlerts.saveFail;
+  dataAlerts.saveFail = {
+    message: `❗ 最近一次儲存失敗：${message}。畫面上的最新資料尚未寫入瀏覽器，重新整理或關閉頁面會遺失！請立即匯出緊急備份。`,
+    actions: [{ id: 'emergency', label: '緊急匯出備份' }]
+  };
+  renderDataAlerts();
+  showToast('❌ 儲存失敗！最新資料尚未保存，請立即匯出緊急備份。', 'error');
+  if (firstTime) alert(`❌ 儲存失敗\n\n原因：${message}\n\n畫面上的最新資料尚未寫入瀏覽器。請按頁面上方的「緊急匯出備份」保存目前資料。`);
 }
 
 // 寫入 LocalStorage
 function saveRecords() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-  } catch (err) {
-    console.error('儲存資料失敗：', err);
-    showToast('儲存失敗，請確認瀏覽器儲存空間！', 'error');
+  if (saveLocked) {
+    reportSaveFailure('為避免覆蓋可搶救的損毀資料，儲存已暫停（請先下載損毀原文）');
+    return false;
   }
+  const result = recordStore.save(records);
+  if (!result.ok) {
+    console.error('儲存資料失敗：', result.error);
+    reportSaveFailure(MailBackupCore.classifySaveError(result.error).message);
+  } else {
+    if (dataAlerts.saveFail) {
+      dataAlerts.saveFail = null;
+      renderDataAlerts();
+      showToast('✅ 儲存已恢復正常，目前資料已寫入。', 'success');
+    }
+    backupMeta.markChanged();
+    renderBackupStatus();
+  }
+  return result.ok;
+}
+// 備份提醒（狀態存於獨立鍵，不影響正式資料）
+const backupMeta = MailBackupCore.createBackupMeta({ storage: window.localStorage });
+
+function renderBackupStatus() {
+  const bar = document.getElementById('backupStatusBar');
+  if (!bar) return;
+  const s = backupMeta.getStatus(records.length);
+  const icons = { ok: '✅', info: 'ℹ️', notice: '📝', warn: '⚠️', danger: '🚨' };
+  bar.className = 'backup-status-bar level-' + s.level;
+  document.getElementById('backupStatusIcon').textContent = icons[s.level] || '💾';
+  document.getElementById('backupStatusMessage').textContent = s.message;
+  const last = s.lastExportAt
+    ? `最後匯出：${s.lastExportAt}（${s.lastExportCount === null ? '?' : s.lastExportCount} 筆）　未備份變更：${s.unsavedChanges} 項`
+    : '最後匯出：尚無紀錄';
+  document.getElementById('backupStatusDetail').textContent = last;
 }
 
 // 綁定事件監聽
@@ -258,6 +387,11 @@ function bindEvents() {
   dom.btnRestoreClose.addEventListener('click', closeRestoreModal);
   dom.btnRestoreCancel.addEventListener('click', closeRestoreModal);
   dom.btnRestoreConfirm.addEventListener('click', executeRestore);
+  document.getElementById('btnIntegrityCheck').addEventListener('click', openIntegrityModal);
+  document.getElementById('btnIntegrityClose').addEventListener('click', closeIntegrityModal);
+  document.getElementById('btnIntegrityOk').addEventListener('click', closeIntegrityModal);
+  document.querySelectorAll('input[name="restoreMode"]').forEach(r =>
+    r.addEventListener('change', renderRestoreDiff));
 
   // 列印清冊
   dom.btnPrint.addEventListener('click', () => {
@@ -707,14 +841,8 @@ function exportToCsv() {
 // 暫存待還原的資料
 let pendingRestoreData = null;
 
-// 匯出完整系統備份 (.json)
-function exportBackupJson() {
-  if (records.length === 0) {
-    if (!confirm('目前系統內尚無任何登記紀錄，確定要匯出空的備份檔嗎？')) {
-      return;
-    }
-  }
-
+// 產生並下載備份檔（格式與既有匯出完全相同），同時更新備份提醒狀態
+function downloadBackupFile(filePrefix) {
   const backupPayload = {
     system: "美和科技大學收發室信件登記系統",
     author: "魏啟軒",
@@ -731,16 +859,30 @@ function exportBackupJson() {
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
   downloadLink.href = url;
-  downloadLink.download = `美和科技大學收發室_系統完整備份_${dateStr}.json`;
+  downloadLink.download = `${filePrefix}_${dateStr}.json`;
   document.body.appendChild(downloadLink);
   downloadLink.click();
   document.body.removeChild(downloadLink);
   URL.revokeObjectURL(url);
 
+  backupMeta.markExported(records.length);
+  renderBackupStatus();
+}
+
+// 匯出完整系統備份 (.json)
+function exportBackupJson() {
+  if (records.length === 0) {
+    if (!confirm('目前系統內尚無任何登記紀錄，確定要匯出空的備份檔嗎？')) {
+      return;
+    }
+  }
+
+  downloadBackupFile('美和科技大學收發室_系統完整備份');
+
   showToast(`💾 系統完整備份檔已成功匯出 (共 ${records.length} 筆)！請妥善保存於電腦中。`, 'success');
 }
 
-// 選擇備份檔案並解析
+// 選擇備份檔案：先驗證，再顯示還原預覽（此階段完全不寫入任何資料）
 function handleBackupFileSelect(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -748,39 +890,13 @@ function handleBackupFileSelect(e) {
   const reader = new FileReader();
   reader.onload = function(evt) {
     try {
-      const content = evt.target.result;
-      const parsed = JSON.parse(content);
-
-      let restoreRecords = [];
-      let backupTime = '未知時間';
-
-      if (parsed && Array.isArray(parsed.records)) {
-        restoreRecords = parsed.records;
-        backupTime = parsed.backupTime || '系統備份檔';
-      } else if (Array.isArray(parsed)) {
-        restoreRecords = parsed;
-        backupTime = '自訂紀錄清單';
-      } else {
-        throw new Error('不符合規範的備份檔案格式');
-      }
-
-      // 驗證紀錄是否有基本欄位
-      const isValid = restoreRecords.every(r => r && (r.trackingNo || r.recipient));
-      if (!isValid && restoreRecords.length > 0) {
-        throw new Error('備份檔案中缺乏有效之信件登記欄位');
-      }
-
+      const validation = MailBackupCore.validateBackup(evt.target.result);
       pendingRestoreData = {
-        records: restoreRecords,
-        backupTime: backupTime
+        validation: validation,
+        records: validation.records,
+        fileName: file.name
       };
-
-      // 顯示還原對話框
-      dom.restoreSummaryTime.textContent = backupTime;
-      dom.restoreSummaryCount.textContent = restoreRecords.length;
-      dom.restoreSummaryCurrent.textContent = records.length;
-      dom.restoreModal.style.display = 'flex';
-
+      openRestorePreview();
     } catch (err) {
       console.error('解析備份檔案失敗：', err);
       showToast('❌ 無法讀取該備份檔：檔案格式錯誤或損毀！', 'error');
@@ -798,51 +914,178 @@ function handleBackupFileSelect(e) {
   reader.readAsText(file);
 }
 
+const RESTORE_FIELD_LABELS = {
+  trackingNo: '編號', mailType: '類型', sender: '寄件人', recipient: '收件人', department: '單位',
+  handler: '經手人', remark: '備註', createdAt: '建立時間', status: '狀態',
+  receivedAt: '領取時間', receivedSigner: '簽收人'
+};
+
+function getSelectedRestoreMode() {
+  const checked = document.querySelector('input[name="restoreMode"]:checked');
+  return checked ? checked.value : 'merge';
+}
+
+// 顯示還原預覽：驗證結果 + 差異比較 + 還原後統計
+function openRestorePreview() {
+  const pending = pendingRestoreData;
+  const v = pending.validation;
+
+  document.getElementById('restoreSummaryFile').textContent = pending.fileName;
+  dom.restoreSummaryTime.textContent = v.backupTime || (v.format === 'legacy-array' ? '舊版備份（無時間資訊）' : '未知');
+  dom.restoreSummaryCount.textContent = v.recordCount;
+  dom.restoreSummaryCurrent.textContent = records.length;
+
+  const msgs = [];
+  v.errors.forEach(x => msgs.push(`<div class="restore-msg error">❌ ${escapeHtml(x.message)}</div>`));
+  v.warnings.forEach(x => msgs.push(`<div class="restore-msg warn">⚠️ ${escapeHtml(x.message)}</div>`));
+  document.getElementById('restoreValidation').innerHTML = msgs.join('');
+
+  document.getElementById('restorePreviewArea').style.display = v.ok ? '' : 'none';
+  dom.btnRestoreConfirm.disabled = !v.ok;
+  if (v.ok) renderRestoreDiff();
+
+  dom.restoreModal.style.display = 'flex';
+}
+
+function describeRecord(r) {
+  return `${escapeHtml(r.trackingNo || '(無編號)')}／${escapeHtml(r.recipient || '(無收件人)')}`;
+}
+
+function renderRestoreDiff() {
+  const pending = pendingRestoreData;
+  if (!pending || !pending.records) return;
+  const mode = getSelectedRestoreMode();
+  const plan = MailBackupCore.planRestore(records, pending.records, mode);
+  const s = plan.summary;
+  const d = plan.diff;
+  const LIMIT = 20;
+
+  const lines = [];
+  lines.push(`<div>還原後系統將有 <span class="num">${s.after}</span> 筆（目前 ${s.before} 筆）</div><ul>`);
+  lines.push(`<li>新增 <span class="num">${s.added}</span> 筆備份中才有的紀錄</li>`);
+  lines.push(`<li>內容完全相同 ${s.identical} 筆（無變動）</li>`);
+  if (mode === 'merge') {
+    lines.push(`<li>與現有內容不同 ${s.keptCurrent} 筆：<strong>保留現有版本</strong>，不會被備份覆蓋</li>`);
+  } else {
+    lines.push(`<li>與現有內容不同 <span class="${s.overwritten ? 'danger' : 'num'}">${s.overwritten}</span> 筆：<strong>將被備份內容覆蓋</strong></li>`);
+    lines.push(`<li>現有但備份中沒有 <span class="${s.removed ? 'danger' : 'num'}">${s.removed}</span> 筆：<strong>將被移除</strong></li>`);
+  }
+  if (s.duplicateInBackup) lines.push(`<li>備份檔內重複 ${s.duplicateInBackup} 筆（不重複匯入）</li>`);
+  lines.push('</ul>');
+
+  const detail = (title, items, fmt) => {
+    if (!items.length) return;
+    const shown = items.slice(0, LIMIT).map(x => `<li>${fmt(x)}</li>`).join('');
+    const more = items.length > LIMIT ? `<li>…另有 ${items.length - LIMIT} 筆未列出</li>` : '';
+    lines.push(`<details><summary>${title}（${items.length}）</summary><ul>${shown}${more}</ul></details>`);
+  };
+  detail('內容不同的紀錄', d.changed, x => {
+    const diffs = x.fields.map(f =>
+      `${RESTORE_FIELD_LABELS[f] || f}：${escapeHtml(String(x.current[f] ?? ''))} → ${escapeHtml(String(x.incoming[f] ?? ''))}`).join('；');
+    return `${describeRecord(x.current)}　${diffs}`;
+  });
+  if (mode === 'replace') detail('將被移除的現有紀錄', d.onlyInCurrent, describeRecord);
+  detail('將新增的紀錄', d.added, describeRecord);
+
+  document.getElementById('restoreDiffBox').innerHTML = lines.join('');
+}
+
+// 資料完整性檢查（唯讀）：只產生報告，不修改任何資料
+function openIntegrityModal() {
+  const res = MailBackupCore.checkIntegrity(records);
+  const LIMIT = 100;
+  const summary = document.getElementById('integritySummary');
+  summary.innerHTML = res.total === 0
+    ? '目前沒有任何紀錄可檢查。'
+    : `共檢查 <span class="num">${res.total}</span> 筆：` +
+      (res.ok && res.warningCount === 0
+        ? '<span class="num">✅ 未發現任何問題</span>'
+        : `<span class="${res.errorCount ? 'danger' : 'num'}">${res.errorCount} 個錯誤</span>、${res.warningCount} 個警告`);
+
+  const shown = res.issues
+    .slice().sort((x, y) => (x.severity === y.severity ? x.index - y.index : x.severity === 'error' ? -1 : 1))
+    .slice(0, LIMIT)
+    .map(x => `<div class="restore-msg ${x.severity === 'error' ? 'error' : 'warn'}">${x.severity === 'error' ? '❌' : '⚠️'} ${escapeHtml(x.message)}</div>`);
+  if (res.issues.length > LIMIT) shown.push(`<div class="restore-note">…另有 ${res.issues.length - LIMIT} 項未列出</div>`);
+  document.getElementById('integrityIssues').innerHTML = shown.join('');
+  document.getElementById('integrityModal').style.display = 'flex';
+}
+
+function closeIntegrityModal() {
+  document.getElementById('integrityModal').style.display = 'none';
+}
+
 function closeRestoreModal() {
   dom.restoreModal.style.display = 'none';
   pendingRestoreData = null;
 }
 
-// 執行還原
+// 執行還原：確認 → 先下載目前資料備份 → （覆蓋需二次確認）→ 寫入 → 重新讀取驗證 → 失敗自動回復
 function executeRestore() {
-  if (!pendingRestoreData || !Array.isArray(pendingRestoreData.records)) {
+  const pending = pendingRestoreData;
+  if (!pending || !pending.validation || !pending.validation.ok || !Array.isArray(pending.records)) {
     closeRestoreModal();
     return;
   }
 
-  const mode = document.querySelector('input[name="restoreMode"]:checked').value;
-  const newRecords = pendingRestoreData.records;
-
-  if (mode === 'replace') {
-    // 完全覆蓋
-    records = [...newRecords];
-    showToast(`✅ 資料還原完成！已由備份檔完全取代（共 ${records.length} 筆）。`, 'success');
-  } else {
-    // 與現有資料合併 (以 ID 或 編號+建立時間 進行去重複)
-    const existingIds = new Set(records.map(r => r.id));
-    const existingKeys = new Set(records.map(r => `${r.trackingNo}_${r.createdAt}`));
-    let addedCount = 0;
-
-    newRecords.forEach(item => {
-      const itemKey = `${item.trackingNo}_${item.createdAt}`;
-      if (!existingIds.has(item.id) && !existingKeys.has(itemKey)) {
-        records.push(item);
-        if (item.id) existingIds.add(item.id);
-        existingKeys.add(itemKey);
-        addedCount++;
-      }
-    });
-
-    // 依建立時間降冪排序 (最新的在最前)
-    records.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-
-    showToast(`✅ 合併還原成功！新增了 ${addedCount} 筆備份紀錄，目前共 ${records.length} 筆。`, 'success');
+  if (saveLocked) {
+    alert('為避免覆蓋可搶救的損毀資料，請先按頁面上方的「下載損毀原文」，再進行還原。');
+    return;
   }
 
-  saveRecords();
+  const mode = getSelectedRestoreMode();
+  const plan = MailBackupCore.planRestore(records, pending.records, mode);
+  const s = plan.summary;
+
+  const firstMsg = mode === 'replace'
+    ? `⚠️ 您選擇「完全覆蓋」！\n\n目前 ${s.before} 筆 → 還原後 ${s.after} 筆\n將覆蓋內容不同的 ${s.overwritten} 筆，並移除備份檔中沒有的 ${s.removed} 筆。\n\n按「確定」後，系統會先下載一份「還原前自動備份」檔。`
+    : `即將以「合併」方式還原：\n新增 ${s.added} 筆，還原後共 ${s.after} 筆（現有 ${s.before} 筆）。\n\n按「確定」後，系統會先下載一份「還原前自動備份」檔。`;
+  if (!confirm(firstMsg)) return;
+
+  // 還原前先保存目前資料（資料為空時沒有東西可保存）
+  if (records.length > 0) {
+    downloadBackupFile('美和科技大學收發室_還原前自動備份');
+  }
+
+  if (mode === 'replace') {
+    const secondMsg = `🔴 最後確認\n\n還原前自動備份檔已下載（共 ${s.before} 筆）。請確認瀏覽器已成功儲存該檔案。\n\n確定要以備份檔完全取代目前資料嗎？此動作無法由本系統復原。`;
+    if (!confirm(secondMsg)) {
+      showToast('已取消還原，目前資料未被變更（還原前備份檔已下載）。', 'info');
+      return;
+    }
+  }
+
+  const result = MailBackupCore.executeRestore({
+    store: recordStore,
+    currentRecords: records,
+    incoming: pending.records,
+    mode: mode,
+    preBackupConfirmed: true,
+    overwriteConfirmed: mode === 'replace'
+  });
+
+  if (!result.ok) {
+    console.error('還原失敗：', result);
+    const extra = result.verification && result.verification.problems.length
+      ? '\n\n' + result.verification.problems.join('\n') : '';
+    alert(`❌ 還原未完成\n\n${result.message}${extra}`);
+    return;
+  }
+
+  // 以重新讀取並驗證過的資料更新畫面
+  records = result.records;
+  dataAlerts.corrupt = null;   // 已成功還原並驗證，損毀警示解除
+  dataAlerts.saveFail = null;
+  renderDataAlerts();
+  backupMeta.markChanged();
   renderTable();
   updateStats();
+  renderBackupStatus();
   closeRestoreModal();
+
+  const after = MailBackupCore.checkIntegrity(records);
+  const note = after.errorCount ? `（資料檢查發現 ${after.errorCount} 個問題）` : '';
+  showToast(`✅ 還原完成並通過驗證：目前共 ${result.verification.count} 筆，新增 ${s.added} 筆${note}。`, 'success');
 }
 
 function cleanCsvField(val) {

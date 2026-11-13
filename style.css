@@ -1002,6 +1002,62 @@ select:focus {
   border-left: 5px solid var(--peacock-accent);
 }
 
+/* 備份提醒列 */
+.backup-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--peacock-border);
+  background: var(--peacock-surface);
+  color: var(--peacock-primary-dark);
+  box-shadow: var(--shadow-sm);
+}
+.backup-status-icon { font-size: 22px; }
+.backup-status-text { flex: 1; min-width: 0; }
+.backup-status-message { font-weight: 600; }
+.backup-status-detail { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+.backup-status-btn { white-space: nowrap; }
+.backup-status-bar.level-info { background: #f0f9ff; border-color: #bae6fd; color: #0369a1; }
+.backup-status-bar.level-notice { background: var(--status-pending-bg); border-color: var(--status-pending-border); color: var(--status-pending-text); }
+.backup-status-bar.level-warn { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+.backup-status-bar.level-danger { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }
+@media (max-width: 640px) {
+  .backup-status-bar { flex-wrap: wrap; }
+  .backup-status-btn { width: 100%; }
+}
+
+/* 資料安全警示 */
+.data-alert-bar:empty { display: none; }
+.data-alert-item {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px; margin-bottom: 12px;
+  border: 1px solid #fca5a5; border-left: 5px solid #dc2626; border-radius: var(--radius-md);
+  background: #fef2f2; color: #991b1b; font-weight: 600;
+}
+.data-alert-message { flex: 1; min-width: 240px; }
+.data-alert-btn { white-space: nowrap; }
+
+/* 資料完整性檢查報告 */
+.integrity-issues { margin-top: 12px; max-height: 320px; overflow: auto; }
+.integrity-issues .restore-msg { margin-bottom: 4px; font-size: 13px; }
+
+/* 還原預覽 */
+.restore-validation:not(:empty) { margin-top: 12px; }
+.restore-msg { padding: 8px 12px; border-radius: var(--radius-sm); font-size: 14px; margin-bottom: 6px; border: 1px solid; }
+.restore-msg.error { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }
+.restore-msg.warn { background: var(--status-pending-bg); border-color: var(--status-pending-border); color: var(--status-pending-text); }
+.restore-box { margin-top: 12px; padding: 12px; border: 1px solid var(--peacock-border); background: var(--peacock-surface); border-radius: var(--radius-md); font-size: 14px; }
+.restore-box ul { margin: 6px 0 0 18px; padding: 0; }
+.restore-box .num { font-weight: 700; color: var(--peacock-primary-dark); }
+.restore-box .danger { color: #b91c1c; font-weight: 700; }
+.restore-box details { margin-top: 8px; }
+.restore-box summary { cursor: pointer; font-weight: 600; color: var(--peacock-primary); }
+.restore-box details ul { max-height: 160px; overflow: auto; font-size: 13px; }
+.restore-note { margin-top: 12px; font-size: 13px; color: var(--text-muted); }
+
 /* 列印專用樣式 */
 @media print {
   /* 當為直式 A4 簽收表列印模式時 */
