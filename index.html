@@ -106,14 +106,7 @@
           <div class="form-group">
             <label for="mailType" class="required">郵件類型</label>
             <div class="select-wrapper">
-              <select id="mailType" name="mailType" required>
-                <option value="掛號函件">掛號函件</option>
-                <option value="掛號包裹">掛號包裹</option>
-                <option value="快遞包裹">快遞包裹</option>
-                <option value="國際函件">國際函件</option>
-                <option value="國際包裹">國際包裹</option>
-                <option value="限時掛號函件">限時掛號函件</option>
-              </select>
+              <select id="mailType" name="mailType" required></select>
             </div>
           </div>
 
@@ -121,11 +114,7 @@
           <div class="form-group">
             <label for="handlerSelect" class="required">郵件經手人</label>
             <div class="select-wrapper">
-              <select id="handlerSelect" name="handlerSelect" required>
-                <option value="陳銘鴻">陳銘鴻</option>
-                <option value="魏啟軒">魏啟軒</option>
-                <option value="其他">其他 (手動輸入)</option>
-              </select>
+              <select id="handlerSelect" name="handlerSelect" required></select>
             </div>
           </div>
 
@@ -277,12 +266,6 @@
         <div class="filter-controls">
           <select id="filterType">
             <option value="ALL">全部郵件類型</option>
-            <option value="掛號函件">掛號函件</option>
-            <option value="掛號包裹">掛號包裹</option>
-            <option value="快遞包裹">快遞包裹</option>
-            <option value="國際函件">國際函件</option>
-            <option value="國際包裹">國際包裹</option>
-            <option value="限時掛號函件">限時掛號函件</option>
           </select>
 
           <select id="filterStatus">
@@ -300,6 +283,9 @@
         </div>
       </div>
 
+      <!-- 列印專用抬頭（僅列印清冊時顯示） -->
+      <div class="print-only print-header" id="printHeader"></div>
+
       <!-- 資料表格 -->
       <div class="table-responsive">
         <table class="data-table" id="mailTable">
@@ -314,7 +300,7 @@
               <th width="110">寄件人</th>
               <th width="90">領取人</th>
               <th width="160">資料建立日期和時間</th>
-              <th width="150">操作</th>
+              <th width="150" class="col-actions-th">操作</th>
             </tr>
           </thead>
           <tbody id="mailTableBody">
@@ -326,8 +312,8 @@
       <!-- 空白狀態提示 -->
       <div class="empty-state" id="emptyState" style="display: none;">
         <div class="empty-icon">📭</div>
-        <p class="empty-title">目前尚無符合條件的信件/包裹紀錄</p>
-        <p class="empty-desc">您可以使用上方表單進行第一筆郵件登記，或嘗試放寬搜尋篩選條件。</p>
+        <p class="empty-title" id="emptyTitle">目前尚無符合條件的信件/包裹紀錄</p>
+        <p class="empty-desc" id="emptyDesc">您可以使用上方表單進行第一筆郵件登記，或嘗試放寬搜尋篩選條件。</p>
         <button type="button" class="btn btn-outline btn-sm" id="btnLoadSample">載入示範測試資料</button>
       </div>
 
@@ -372,23 +358,12 @@
 
             <div class="form-group">
               <label for="editMailType" class="required">郵件類型</label>
-              <select id="editMailType" required>
-                <option value="掛號函件">掛號函件</option>
-                <option value="掛號包裹">掛號包裹</option>
-                <option value="快遞包裹">快遞包裹</option>
-                <option value="國際函件">國際函件</option>
-                <option value="國際包裹">國際包裹</option>
-                <option value="限時掛號函件">限時掛號函件</option>
-              </select>
+              <select id="editMailType" required></select>
             </div>
 
             <div class="form-group">
               <label for="editHandlerSelect" class="required">郵件經手人</label>
-              <select id="editHandlerSelect" required>
-                <option value="陳銘鴻">陳銘鴻</option>
-                <option value="魏啟軒">魏啟軒</option>
-                <option value="其他">其他 (手動輸入)</option>
-              </select>
+              <select id="editHandlerSelect" required></select>
             </div>
 
             <div class="form-group col-span-2" id="editHandlerOtherGroup" style="display: none;">
@@ -601,6 +576,13 @@
           <span id="summaryRecordsCountTag" class="badge badge-received">符合 0 筆</span>
         </div>
 
+        <!-- 分頁（每張圖最多 40 筆） -->
+        <div class="summary-pager" id="summaryPager" style="display: none;">
+          <button type="button" class="btn btn-outline btn-sm" id="btnSummaryPrev">◀ 上一頁</button>
+          <span id="summaryPageInfo" role="status" aria-live="polite"></span>
+          <button type="button" class="btn btn-outline btn-sm" id="btnSummaryNext">下一頁 ▶</button>
+        </div>
+
         <!-- 圖片畫布預覽容器 -->
         <div class="canvas-preview-wrapper">
           <canvas id="summaryCanvas"></canvas>
@@ -720,7 +702,7 @@
   </div>
 
   <!-- 提示訊息 Toast -->
-  <div class="toast" id="systemToast">
+  <div class="toast" id="systemToast" role="status" aria-live="polite">
     <div class="toast-content" id="toastMessage">操作成功</div>
   </div>
 

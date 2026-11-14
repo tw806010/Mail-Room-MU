@@ -7,8 +7,65 @@
 // LocalStorage 儲存鍵名
 const STORAGE_KEY = 'meiho_mailroom_records_v1';
 
+// ==========================================
+// 集中設定（郵件類型沿用核心模組；經手人名單於此維護）
+// ==========================================
+const MAIL_TYPES = MailBackupCore.MAIL_TYPES;
+const HANDLERS = ['陳銘鴻', '魏啟軒'];      // 固定經手人名單
+const HANDLER_OTHER = '其他';              // 下拉選「其他」時，需手動輸入姓名
+const SUMMARY_PAGE_SIZE = 40;              // 收件摘要圖片：每張圖最多筆數
+const NO_NAME_TEXT = '—';                  // 查無製表人／經手人時顯示
+
 // 系統狀態
 let records = [];
+
+// 紀錄是否為可處理的物件（資料中若混入 null 或非物件，一律略過，不讓整頁當掉）
+function isRecordObject(r) {
+  return r !== null && typeof r === 'object' && !Array.isArray(r);
+}
+function validRecords() {
+  return records.filter(isRecordObject);
+}
+function findRecordById(id) {
+  if (typeof id !== 'string' || id === '') return undefined;
+  return records.find(r => isRecordObject(r) && r.id === id);
+}
+// 安全轉字串（欄位若被改成數字或物件也不會在 .toLowerCase() 等處拋例外）
+function textOf(v) {
+  return v === null || v === undefined ? '' : String(v);
+}
+
+// 依集中設定產生下拉選單選項（HTML 不再重複寫死）
+function fillSelect(select, values, options) {
+  if (!select) return;
+  const opts = options || {};
+  select.innerHTML = '';
+  if (opts.allLabel) {
+    const o = document.createElement('option');
+    o.value = 'ALL';
+    o.textContent = opts.allLabel;
+    select.appendChild(o);
+  }
+  values.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = v;
+    select.appendChild(o);
+  });
+  if (opts.withOther) {
+    const o = document.createElement('option');
+    o.value = HANDLER_OTHER;
+    o.textContent = `${HANDLER_OTHER} (手動輸入)`;
+    select.appendChild(o);
+  }
+}
+function populateSelects() {
+  fillSelect(document.getElementById('mailType'), MAIL_TYPES);
+  fillSelect(document.getElementById('editMailType'), MAIL_TYPES);
+  fillSelect(document.getElementById('filterType'), MAIL_TYPES, { allLabel: '全部郵件類型' });
+  fillSelect(document.getElementById('handlerSelect'), HANDLERS, { withOther: true });
+  fillSelect(document.getElementById('editHandlerSelect'), HANDLERS, { withOther: true });
+}
 
 // DOM 元素快取
 const dom = {
@@ -98,6 +155,13 @@ const dom = {
   summaryCanvas: document.getElementById('summaryCanvas'),
   btnDownloadSummaryImage: document.getElementById('btnDownloadSummaryImage'),
   btnCopySummaryImage: document.getElementById('btnCopySummaryImage'),
+  summaryPager: document.getElementById('summaryPager'),
+  summaryPageInfo: document.getElementById('summaryPageInfo'),
+  btnSummaryPrev: document.getElementById('btnSummaryPrev'),
+  btnSummaryNext: document.getElementById('btnSummaryNext'),
+  emptyTitle: document.getElementById('emptyTitle'),
+  emptyDesc: document.getElementById('emptyDesc'),
+  printHeader: document.getElementById('printHeader'),
   optSummaryToday: document.getElementById('optSummaryToday'),
   optSummaryYesterday: document.getElementById('optSummaryYesterday'),
   // 簽收表 Modal
@@ -122,6 +186,7 @@ const dom = {
 
 // 初始化載入
 document.addEventListener('DOMContentLoaded', () => {
+  populateSelects();
   initClock();
   loadRecords();
   bindEvents();
@@ -132,7 +197,88 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('dataAlertBar').addEventListener('click', onDataAlertClick);
   document.getElementById('btnBackupNow').addEventListener('click', exportBackupJson);
   setInterval(renderBackupStatus, 60000); // 每分鐘重新評估是否逾 24 小時
+  setInterval(checkDayRollover, 60000);   // 每分鐘檢查是否跨日
+  window.addEventListener('storage', onStorageEvent);
+  document.addEventListener('keydown', onGlobalKeydown);
 });
+
+// 跨過午夜自動更新：換日後「今日」統計與篩選結果需重新計算
+let lastSeenDay = formatCurrentDateTime().slice(0, 10);
+function checkDayRollover() {
+  const today = formatCurrentDateTime().slice(0, 10);
+  if (today === lastSeenDay) return;
+  lastSeenDay = today;
+  updateStats();
+  renderTable();
+}
+
+// 多分頁同步：其他分頁修改了紀錄時，重新讀取並提醒使用者
+function onStorageEvent(e) {
+  if (e.storageArea && e.storageArea !== window.localStorage) return;
+  if (e.key !== null && e.key !== STORAGE_KEY) return;   // key 為 null 代表整個儲存空間被清空
+  reloadFromStorage();
+  const editing = dom.editModal.style.display === 'flex';
+  const signing = dom.quickSignModal.style.display === 'flex';
+  if (editing || signing) {
+    markOpenModalsStale();
+    showToast('⚠️ 資料已在其他分頁更新，已重新載入。您正在處理的視窗內容可能已過期，請重新確認後再儲存。', 'error');
+  } else {
+    showToast('資料已在其他分頁更新，已重新載入', 'info');
+  }
+}
+
+// 重新讀取儲存內容並更新畫面（同時讓儲存層的「寫入前比對」基準追上最新內容）
+function reloadFromStorage() {
+  dataAlerts.stale = null;
+  loadRecords();
+  renderDataAlerts();
+  renderTable();
+  updateStats();
+  renderBackupStatus();
+}
+
+// 開啟中的修改／簽收視窗，加上「資料已過期」提醒
+function markOpenModalsStale() {
+  [dom.editModal, dom.quickSignModal].forEach(modal => {
+    if (modal.style.display !== 'flex') return;
+    const body = modal.querySelector('.modal-body');
+    if (!body || body.querySelector('.modal-stale-note')) return;
+    const note = document.createElement('div');
+    note.className = 'modal-stale-note';
+    note.setAttribute('role', 'alert');
+    note.textContent = '⚠️ 資料已在其他分頁更新。此視窗顯示的內容可能已過期，請確認後再儲存，或關閉後重新開啟。';
+    body.insertBefore(note, body.firstChild);
+  });
+}
+function clearModalStaleNotes() {
+  document.querySelectorAll('.modal-stale-note').forEach(n => n.remove());
+}
+
+// Modal 共通：Esc 關閉、開啟時焦點移到第一個輸入欄
+const MODAL_CLOSERS = {
+  editModal: () => closeEditModal(),
+  quickSignModal: () => closeQuickSignModal(),
+  restoreModal: () => closeRestoreModal(),
+  integrityModal: () => closeIntegrityModal(),
+  summaryModal: () => closeSummaryModal(),
+  signSheetModal: () => closeSignSheetModal()
+};
+function onGlobalKeydown(e) {
+  if (e.key !== 'Escape') return;
+  const open = Object.keys(MODAL_CLOSERS)
+    .map(id => document.getElementById(id))
+    .filter(m => m && m.style.display === 'flex');
+  if (open.length === 0) return;
+  e.preventDefault();
+  MODAL_CLOSERS[open[open.length - 1].id]();
+}
+function focusFirstField(modal) {
+  if (!modal) return;
+  const target = modal.querySelector(
+    'input:not([type="hidden"]):not([disabled]):not([type="radio"]), select:not([disabled]), textarea:not([disabled])'
+  ) || modal.querySelector('button:not([disabled])');
+  if (target) target.focus();
+}
 
 // 時鐘功能
 function initClock() {
@@ -174,7 +320,7 @@ const recordStore = MailBackupCore.createStore({ storage: window.localStorage, k
 const corruptStash = MailBackupCore.createCorruptStash({ storage: window.localStorage });
 
 // 資料安全警示（持續顯示直到問題排除）
-const dataAlerts = { saveFail: null, corrupt: null };
+const dataAlerts = { saveFail: null, corrupt: null, stale: null };
 let saveLocked = false;   // 損毀原文尚未保存/下載前，暫停寫入以免覆蓋
 let corruptRaw = null;    // 讀到的損毀原文
 
@@ -266,18 +412,42 @@ function onDataAlertClick(e) {
   if (act === 'emergency') downloadBackupFile('美和科技大學收發室_緊急備份');
   else if (act === 'downloadCorrupt') downloadCorruptRaw();
   else if (act === 'dismissCorrupt') { dataAlerts.corrupt = null; renderDataAlerts(); }
+  else if (act === 'reloadData') {
+    reloadFromStorage();
+    showToast('已重新載入最新資料，請再確認後重新操作。', 'info');
+  }
+}
+
+// 其他分頁已改動資料：拒絕寫入，持續警示並提供「重新載入」，絕不默默覆蓋
+function reportStaleData() {
+  dataAlerts.stale = {
+    message: '⚠️ 資料已在其他視窗或分頁被更新，為避免覆蓋對方的資料，這次的變更沒有儲存。請按「重新載入」取得最新資料後，再重新操作一次。',
+    actions: [{ id: 'reloadData', label: '重新載入' }]
+  };
+  renderDataAlerts();
+  showToast('⚠️ 資料已在其他分頁更新，本次變更未儲存，請按「重新載入」。', 'error');
+  markOpenModalsStale();
 }
 
 // 儲存失敗：明確警告，保留畫面資料並提供緊急匯出
 function reportSaveFailure(message) {
   const firstTime = !dataAlerts.saveFail;
   dataAlerts.saveFail = {
-    message: `❗ 最近一次儲存失敗：${message}。畫面上的最新資料尚未寫入瀏覽器，重新整理或關閉頁面會遺失！請立即匯出緊急備份。`,
+    message: `❗ 最近一次儲存失敗：${message}。該次操作「沒有」被記錄（表單內容仍保留，請勿當成已完成）。請先按「緊急匯出備份」保存目前已儲存的資料，再排除問題後重新送出。`,
     actions: [{ id: 'emergency', label: '緊急匯出備份' }]
   };
   renderDataAlerts();
-  showToast('❌ 儲存失敗！最新資料尚未保存，請立即匯出緊急備份。', 'error');
-  if (firstTime) alert(`❌ 儲存失敗\n\n原因：${message}\n\n畫面上的最新資料尚未寫入瀏覽器。請按頁面上方的「緊急匯出備份」保存目前資料。`);
+  showToast('❌ 儲存失敗！這次的操作沒有被記錄，請先匯出緊急備份。', 'error');
+  if (firstTime) alert(`❌ 儲存失敗\n\n原因：${message}\n\n這次的操作沒有被記錄（表單內容仍保留，畫面已回到最後一次成功儲存的狀態）。請按頁面上方的「緊急匯出備份」保存目前資料，排除問題後重新送出。`);
+}
+
+// 寫入並在失敗時還原記憶體中的變更，讓畫面永遠等於已儲存的狀態；失敗時回傳 false
+function persistOrRollback(rollback) {
+  if (saveRecords()) return true;
+  try { rollback(); } catch (err) { console.error('還原記憶體變更失敗：', err); }
+  renderTable();
+  updateStats();
+  return false;
 }
 
 // 寫入 LocalStorage
@@ -287,6 +457,10 @@ function saveRecords() {
     return false;
   }
   const result = recordStore.save(records);
+  if (!result.ok && result.code === 'STALE_DATA') {
+    reportStaleData();
+    return false;
+  }
   if (!result.ok) {
     console.error('儲存資料失敗：', result.error);
     reportSaveFailure(MailBackupCore.classifySaveError(result.error).message);
@@ -322,7 +496,7 @@ function renderBackupStatus() {
 function bindEvents() {
   // 經手人下拉連動手動輸入 (登記表單)
   dom.handlerSelect.addEventListener('change', (e) => {
-    if (e.target.value === '其他') {
+    if (e.target.value === HANDLER_OTHER) {
       dom.handlerOtherGroup.style.display = 'flex';
       dom.handlerOther.required = true;
       dom.handlerOther.focus();
@@ -343,6 +517,9 @@ function bindEvents() {
     dom.trackingNo.focus();
   });
 
+  // 表格按鈕：事件委派（按鈕只帶 data-action / data-id，不再使用 inline onclick）
+  dom.mailTableBody.addEventListener('click', onTableActionClick);
+
   // 搜尋與篩選事件
   dom.searchInput.addEventListener('input', renderTable);
   dom.filterType.addEventListener('change', renderTable);
@@ -357,11 +534,13 @@ function bindEvents() {
   dom.btnSummaryClose.addEventListener('click', closeSummaryModal);
   dom.btnSummaryCancel.addEventListener('click', closeSummaryModal);
   dom.summaryDateFilter.addEventListener('change', onSummaryDateFilterChange);
-  dom.summaryCustomDate.addEventListener('input', renderSummaryCanvas);
-  dom.summaryStatusFilter.addEventListener('change', renderSummaryCanvas);
-  dom.summarySortOrder.addEventListener('change', renderSummaryCanvas);
+  dom.summaryCustomDate.addEventListener('input', onSummaryFilterChange);
+  dom.summaryStatusFilter.addEventListener('change', onSummaryFilterChange);
+  dom.summarySortOrder.addEventListener('change', onSummaryFilterChange);
   dom.btnDownloadSummaryImage.addEventListener('click', downloadSummaryImage);
   dom.btnCopySummaryImage.addEventListener('click', copySummaryImage);
+  dom.btnSummaryPrev.addEventListener('click', () => changeSummaryPage(-1));
+  dom.btnSummaryNext.addEventListener('click', () => changeSummaryPage(1));
 
   // 生成簽收表按鈕
   dom.btnOpenSignSheetModal.addEventListener('click', openSignSheetModal);
@@ -395,7 +574,12 @@ function bindEvents() {
 
   // 列印清冊
   dom.btnPrint.addEventListener('click', () => {
+    updatePrintHeader();
     window.print();
+  });
+  // 也涵蓋以 Ctrl+P 直接列印的情況（簽收表模式不使用清冊抬頭）
+  window.addEventListener('beforeprint', () => {
+    if (!document.body.classList.contains('printing-a4-sign-sheet')) updatePrintHeader();
   });
 
   // 示範資料載入按鈕
@@ -403,7 +587,7 @@ function bindEvents() {
 
   // 編輯 Modal 經手人下拉連動
   dom.editHandlerSelect.addEventListener('change', (e) => {
-    if (e.target.value === '其他') {
+    if (e.target.value === HANDLER_OTHER) {
       dom.editHandlerOtherGroup.style.display = 'flex';
       dom.editHandlerOther.required = true;
       dom.editHandlerOther.focus();
@@ -449,24 +633,61 @@ function bindEvents() {
   });
 }
 
+// 必填欄位檢查（trim 後不可為空）。第一個空白的欄位會顯示錯誤並取得焦點；全部通過回傳 true
+function requireFilled(fields) {
+  for (const [el, label] of fields) {
+    if (!el.value.trim()) {
+      showToast(`請填寫「${label}」（不可只輸入空白）！`, 'error');
+      el.focus();
+      return false;
+    }
+  }
+  return true;
+}
+
+// 讀取經手人：選「其他」時，手動輸入欄必填，不可默默變成「其他經手人」
+function readHandlerValue(selectEl, otherEl) {
+  if (selectEl.value !== HANDLER_OTHER) return selectEl.value;
+  const name = otherEl.value.trim();
+  if (!name) {
+    showToast('經手人選擇「其他」時，請輸入經手人姓名！', 'error');
+    otherEl.focus();
+    return null;
+  }
+  return name;
+}
+
 // 處理登記送出
 function handleRegisterSubmit(e) {
   e.preventDefault();
 
+  if (!requireFilled([
+    [dom.trackingNo, '掛號函件 / 包裹編號'],
+    [dom.sender, '寄件人'],
+    [dom.recipient, '收件人'],
+    [dom.department, '收件人所屬單位']
+  ])) return;
+
+  const handler = readHandlerValue(dom.handlerSelect, dom.handlerOther);
+  if (handler === null) return;
+
   const trackingNo = dom.trackingNo.value.trim();
   const mailType = dom.mailType.value;
-  let handler = dom.handlerSelect.value;
-  if (handler === '其他') {
-    handler = dom.handlerOther.value.trim() || '其他經手人';
-  }
   const sender = dom.sender.value.trim();
   const recipient = dom.recipient.value.trim();
   const department = dom.department.value.trim();
   const remark = dom.remark.value.trim();
 
-  if (!trackingNo || !sender || !recipient || !department) {
-    showToast('請務必填寫所有必填欄位！', 'error');
-    return;
+  // 防止重複刷條碼：相同編號且仍待領取的紀錄已存在時，先請使用者確認
+  const dup = MailBackupCore.findPendingDuplicate(records, trackingNo);
+  if (dup) {
+    const ok = confirm(
+      `此編號已於 ${textOf(dup.createdAt)} 登記給 ${textOf(dup.recipient)}（狀態：待領取），確定要再登記一次嗎？`);
+    if (!ok) {
+      dom.trackingNo.focus();
+      dom.trackingNo.select();
+      return;
+    }
   }
 
   // 建立新資料物件
@@ -485,9 +706,14 @@ function handleRegisterSubmit(e) {
     receivedSigner: ''
   };
 
-  // 新紀錄排在最前
+  // 新紀錄排在最前；儲存失敗時復原，且不清空表單、不顯示成功訊息
   records.unshift(newRecord);
-  saveRecords();
+  const saved = persistOrRollback(() => {
+    const i = records.indexOf(newRecord);
+    if (i >= 0) records.splice(i, 1);
+  });
+  if (!saved) return;
+
   renderTable();
   updateStats();
 
@@ -510,17 +736,11 @@ function getFilteredRecords() {
   const todayStr = formatCurrentDateTime().slice(0, 10);
   const now = new Date();
 
-  return records.filter(item => {
+  return validRecords().filter(item => {
     // 關鍵字搜尋 (編號、收件人、寄件人、單位、經手人、領取人)
     if (searchTerm) {
-      const matchSearch =
-        (item.trackingNo && item.trackingNo.toLowerCase().includes(searchTerm)) ||
-        (item.recipient && item.recipient.toLowerCase().includes(searchTerm)) ||
-        (item.department && item.department.toLowerCase().includes(searchTerm)) ||
-        (item.sender && item.sender.toLowerCase().includes(searchTerm)) ||
-        (item.handler && item.handler.toLowerCase().includes(searchTerm)) ||
-        (item.receivedSigner && item.receivedSigner.toLowerCase().includes(searchTerm));
-
+      const matchSearch = [item.trackingNo, item.recipient, item.department, item.sender, item.handler, item.receivedSigner]
+        .some(v => textOf(v).toLowerCase().includes(searchTerm));
       if (!matchSearch) return false;
     }
 
@@ -536,7 +756,7 @@ function getFilteredRecords() {
 
     // 日期過濾
     if (selectedDate !== 'ALL' && item.createdAt) {
-      const recordDateStr = item.createdAt.slice(0, 10);
+      const recordDateStr = textOf(item.createdAt).slice(0, 10);
       if (selectedDate === 'TODAY') {
         if (recordDateStr !== todayStr) return false;
       } else if (selectedDate === 'WEEK') {
@@ -561,12 +781,24 @@ function renderTable() {
 
   if (filtered.length === 0) {
     dom.emptyState.style.display = 'block';
+    if (records.length === 0) {
+      // 系統內完全沒有紀錄：才提供「載入示範資料」
+      dom.emptyTitle.textContent = '目前尚無任何信件/包裹紀錄';
+      dom.emptyDesc.textContent = '您可以使用上方表單進行第一筆郵件登記。';
+      dom.btnLoadSample.style.display = '';
+    } else {
+      // 已有紀錄但篩選後為 0 筆：不可出現示範資料按鈕
+      dom.emptyTitle.textContent = '沒有符合篩選條件的紀錄';
+      dom.emptyDesc.textContent = '請放寬搜尋關鍵字或篩選條件後再試。';
+      dom.btnLoadSample.style.display = 'none';
+    }
     dom.recordCountInfo.textContent = '顯示 0 筆紀錄';
     return;
   }
 
   dom.emptyState.style.display = 'none';
-  dom.recordCountInfo.textContent = `顯示 ${filtered.length} 筆紀錄 (共 ${records.length} 筆歷史紀錄)`;
+  dom.btnLoadSample.style.display = 'none';
+  dom.recordCountInfo.textContent = `顯示 ${filtered.length} 筆紀錄 (共 ${validRecords().length} 筆歷史紀錄)`;
 
   const fragment = document.createDocumentFragment();
 
@@ -582,13 +814,14 @@ function renderTable() {
     // 領取人欄位：若已領取則帶入領取人姓名，若尚未領取則留空
     const receiverText = isReceived ? escapeHtml(item.receivedSigner || item.recipient || '') : '';
 
-    // 簽收/領取按鈕或狀態切換
+    // 按鈕只帶 data-action / data-id（值經 escapeHtml），由 mailTableBody 事件委派處理
+    const safeId = escapeHtml(item.id);
     const actionSignBtn = isReceived
-      ? `<button type="button" class="btn-action-edit" onclick="revertSignStatus('${item.id}')" title="還原為待領取狀態">取消簽收</button>`
-      : `<button type="button" class="btn-action-sign" onclick="openQuickSignModal('${item.id}')">🖊️ 簽收領取</button>`;
+      ? `<button type="button" class="btn-action-edit" data-action="revert" data-id="${safeId}" title="還原為待領取狀態">取消簽收</button>`
+      : `<button type="button" class="btn-action-sign" data-action="sign" data-id="${safeId}">🖊️ 簽收領取</button>`;
 
     // 修改按鈕 (保留修改按鈕，不設刪除按鈕)
-    const actionEditBtn = `<button type="button" class="btn-action-edit" onclick="openEditModal('${item.id}')">✏️ 修改</button>`;
+    const actionEditBtn = `<button type="button" class="btn-action-edit" data-action="edit" data-id="${safeId}">✏️ 修改</button>`;
 
     tr.innerHTML = `
       <td>${index + 1}</td>
@@ -612,14 +845,30 @@ function renderTable() {
   dom.mailTableBody.appendChild(fragment);
 }
 
+// 表格按鈕事件委派
+function onTableActionClick(e) {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || !dom.mailTableBody.contains(btn)) return;
+  const id = btn.dataset.id;
+  if (!id) {
+    showToast('此筆紀錄缺少 ID，無法操作。請按「資料檢查」確認，或重新還原備份（還原時會自動補上 ID）。', 'error');
+    return;
+  }
+  const action = btn.dataset.action;
+  if (action === 'sign') openQuickSignModal(id);
+  else if (action === 'revert') revertSignStatus(id);
+  else if (action === 'edit') openEditModal(id);
+}
+
 // 更新統計卡片數字
 function updateStats() {
   const todayStr = formatCurrentDateTime().slice(0, 10);
+  const list = validRecords();
 
-  const todayCount = records.filter(r => r.createdAt && r.createdAt.startsWith(todayStr)).length;
-  const pendingCount = records.filter(r => r.status === 'PENDING').length;
-  const receivedCount = records.filter(r => r.status === 'RECEIVED').length;
-  const totalCount = records.length;
+  const todayCount = list.filter(r => textOf(r.createdAt).startsWith(todayStr)).length;
+  const pendingCount = list.filter(r => r.status === 'PENDING').length;
+  const receivedCount = list.filter(r => r.status === 'RECEIVED').length;
+  const totalCount = list.length;
 
   dom.statTodayCount.textContent = todayCount;
   dom.statPendingCount.textContent = pendingCount;
@@ -627,11 +876,24 @@ function updateStats() {
   dom.statTotalCount.textContent = totalCount;
 }
 
-// 開啟快速簽收 Modal
-window.openQuickSignModal = function(id) {
-  const record = records.find(r => r.id === id);
-  if (!record) return;
+// 紀錄快照與復原（儲存失敗時把記憶體中的紀錄還原成修改前）
+function snapshotRecord(record) {
+  return JSON.parse(JSON.stringify(record));
+}
+function restoreSnapshot(record, snapshot) {
+  Object.keys(record).forEach(k => { delete record[k]; });
+  Object.assign(record, snapshot);
+}
 
+// 開啟快速簽收 Modal
+function openQuickSignModal(id) {
+  const record = findRecordById(id);
+  if (!record) {
+    showToast('找不到這筆紀錄，可能已在其他分頁更新，請重新載入。', 'error');
+    return;
+  }
+
+  clearModalStaleNotes();
   dom.signRecordId.value = record.id;
   dom.signSummaryNo.textContent = record.trackingNo;
   dom.signSummaryRecipient.textContent = record.recipient;
@@ -642,10 +904,11 @@ window.openQuickSignModal = function(id) {
   dom.quickSignModal.style.display = 'flex';
   dom.signerInput.focus();
   dom.signerInput.select();
-};
+}
 
 function closeQuickSignModal() {
   dom.quickSignModal.style.display = 'none';
+  clearModalStaleNotes();
 }
 
 function handleSignConfirm(e) {
@@ -653,70 +916,99 @@ function handleSignConfirm(e) {
   const id = dom.signRecordId.value;
   const signer = dom.signerInput.value.trim() || '本人';
 
-  const record = records.find(r => r.id === id);
-  if (record) {
-    record.status = 'RECEIVED';
-    record.receivedAt = formatCurrentDateTime();
-    record.receivedSigner = signer;
-
-    saveRecords();
-    renderTable();
-    updateStats();
-    closeQuickSignModal();
-    showToast(`✅ 已完成簽收：【${record.recipient}】 (簽收人: ${signer})`, 'success');
+  const record = findRecordById(id);
+  if (!record) {
+    showToast('找不到這筆紀錄，可能已在其他分頁更新，請重新載入。', 'error');
+    return;
   }
+
+  const before = snapshotRecord(record);
+  const nowStr = formatCurrentDateTime();
+  record.status = 'RECEIVED';
+  record.receivedAt = nowStr;
+  record.receivedSigner = signer;
+  MailBackupCore.appendHistory(record, 'sign', MailBackupCore.diffFields(before, record), nowStr);
+
+  // 儲存失敗：還原、保留視窗，且不顯示成功訊息
+  if (!persistOrRollback(() => restoreSnapshot(record, before))) return;
+
+  renderTable();
+  updateStats();
+  closeQuickSignModal();
+  showToast(`✅ 已完成簽收：【${record.recipient}】 (簽收人: ${signer})`, 'success');
 }
 
 // 取消簽收狀態（復原為待領取）
-window.revertSignStatus = function(id) {
-  const record = records.find(r => r.id === id);
-  if (!record) return;
-
-  if (confirm(`確定要將【${record.recipient}】的郵件還原為「待領取」狀態嗎？`)) {
-    record.status = 'PENDING';
-    record.receivedAt = null;
-    record.receivedSigner = '';
-
-    saveRecords();
-    renderTable();
-    updateStats();
-    showToast(`已將【${record.recipient}】的狀態還原為待領取`, 'info');
+function revertSignStatus(id) {
+  const record = findRecordById(id);
+  if (!record) {
+    showToast('找不到這筆紀錄，可能已在其他分頁更新，請重新載入。', 'error');
+    return;
   }
-};
+
+  if (!confirm(`確定要將【${record.recipient}】的郵件還原為「待領取」狀態嗎？`)) return;
+
+  const before = snapshotRecord(record);
+  const nowStr = formatCurrentDateTime();
+  record.status = 'PENDING';
+  record.receivedAt = null;
+  record.receivedSigner = '';
+  MailBackupCore.appendHistory(record, 'unsign', MailBackupCore.diffFields(before, record), nowStr);
+
+  if (!persistOrRollback(() => restoreSnapshot(record, before))) return;
+
+  renderTable();
+  updateStats();
+  showToast(`已將【${record.recipient}】的狀態還原為待領取`, 'info');
+}
 
 // 開啟修改 Modal
-window.openEditModal = function(id) {
-  const record = records.find(r => r.id === id);
-  if (!record) return;
+function openEditModal(id) {
+  const record = findRecordById(id);
+  if (!record) {
+    showToast('找不到這筆紀錄，可能已在其他分頁更新，請重新載入。', 'error');
+    return;
+  }
 
+  clearModalStaleNotes();
   dom.editRecordId.value = record.id;
-  dom.editTrackingNo.value = record.trackingNo;
-  dom.editMailType.value = record.mailType || '掛號函件';
+  dom.editTrackingNo.value = textOf(record.trackingNo);
+
+  // 郵件類型：若舊資料的類型不在標準清單內，暫時補上該選項，避免儲存時被默默改掉
+  dom.editMailType.querySelectorAll('option[data-temp]').forEach(o => o.remove());
+  const mt = record.mailType || MAIL_TYPES[0];
+  if (!MAIL_TYPES.includes(mt)) {
+    const o = document.createElement('option');
+    o.value = mt;
+    o.textContent = `${mt}（非標準類型）`;
+    o.dataset.temp = '1';
+    dom.editMailType.appendChild(o);
+  }
+  dom.editMailType.value = mt;
 
   // 經手人設定
-  const defaultHandlers = ['陳銘鴻', '魏啟軒'];
-  if (defaultHandlers.includes(record.handler)) {
+  if (HANDLERS.includes(record.handler)) {
     dom.editHandlerSelect.value = record.handler;
     dom.editHandlerOtherGroup.style.display = 'none';
     dom.editHandlerOther.required = false;
     dom.editHandlerOther.value = '';
   } else {
-    dom.editHandlerSelect.value = '其他';
+    dom.editHandlerSelect.value = HANDLER_OTHER;
     dom.editHandlerOtherGroup.style.display = 'flex';
     dom.editHandlerOther.required = true;
-    dom.editHandlerOther.value = record.handler;
+    dom.editHandlerOther.value = textOf(record.handler);
   }
 
-  dom.editSender.value = record.sender;
-  dom.editRecipient.value = record.recipient;
-  dom.editDepartment.value = record.department;
-  dom.editRemark.value = record.remark || '';
+  dom.editSender.value = textOf(record.sender);
+  dom.editRecipient.value = textOf(record.recipient);
+  dom.editDepartment.value = textOf(record.department);
+  dom.editRemark.value = textOf(record.remark);
 
   // 狀態
   if (record.status === 'RECEIVED') {
     dom.radioStatusReceived.checked = true;
     dom.editReceivedInfoGroup.style.display = 'flex';
-    dom.editReceivedSigner.value = record.receivedSigner || record.recipient;
+    dom.editReceivedSigner.value = record.receivedSigner || record.recipient || '';
   } else {
     dom.radioStatusPending.checked = true;
     dom.editReceivedInfoGroup.style.display = 'none';
@@ -724,24 +1016,36 @@ window.openEditModal = function(id) {
   }
 
   dom.editModal.style.display = 'flex';
-};
+  focusFirstField(dom.editModal);
+}
 
 function closeEditModal() {
   dom.editModal.style.display = 'none';
+  clearModalStaleNotes();
 }
 
 function handleEditSave(e) {
   e.preventDefault();
   const id = dom.editRecordId.value;
-  const record = records.find(r => r.id === id);
-  if (!record) return;
+  const record = findRecordById(id);
+  if (!record) {
+    showToast('找不到這筆紀錄，可能已在其他分頁更新，請重新載入。', 'error');
+    return;
+  }
+
+  // 與登記表單一致：trim 後不可為空
+  if (!requireFilled([
+    [dom.editTrackingNo, '掛號函件 / 包裹編號'],
+    [dom.editSender, '寄件人'],
+    [dom.editRecipient, '收件人'],
+    [dom.editDepartment, '收件人所屬單位']
+  ])) return;
+
+  const handler = readHandlerValue(dom.editHandlerSelect, dom.editHandlerOther);
+  if (handler === null) return;
 
   const trackingNo = dom.editTrackingNo.value.trim();
   const mailType = dom.editMailType.value;
-  let handler = dom.editHandlerSelect.value;
-  if (handler === '其他') {
-    handler = dom.editHandlerOther.value.trim() || '其他經手人';
-  }
   const sender = dom.editSender.value.trim();
   const recipient = dom.editRecipient.value.trim();
   const department = dom.editDepartment.value.trim();
@@ -749,6 +1053,9 @@ function handleEditSave(e) {
 
   const isReceived = document.querySelector('input[name="editStatusRadio"]:checked').value === 'RECEIVED';
   const receivedSigner = dom.editReceivedSigner.value.trim();
+
+  const before = snapshotRecord(record);
+  const nowStr = formatCurrentDateTime();
 
   // 更新紀錄
   record.trackingNo = trackingNo;
@@ -761,7 +1068,7 @@ function handleEditSave(e) {
 
   if (isReceived) {
     if (record.status !== 'RECEIVED') {
-      record.receivedAt = formatCurrentDateTime();
+      record.receivedAt = nowStr;
     }
     record.status = 'RECEIVED';
     record.receivedSigner = receivedSigner || recipient;
@@ -771,11 +1078,45 @@ function handleEditSave(e) {
     record.receivedSigner = '';
   }
 
-  saveRecords();
+  const changes = MailBackupCore.diffFields(before, record);
+  if (Object.keys(changes).length === 0) {
+    restoreSnapshot(record, before);
+    closeEditModal();
+    showToast('沒有任何變更。', 'info');
+    return;
+  }
+  MailBackupCore.appendHistory(record, 'edit', changes, nowStr);
+
+  // 儲存失敗：還原、保留視窗讓使用者重試，且不顯示成功訊息
+  if (!persistOrRollback(() => restoreSnapshot(record, before))) return;
+
   renderTable();
   updateStats();
   closeEditModal();
   showToast('💾 資料修改已儲存！', 'success');
+}
+
+// ---- 列印清冊抬頭（僅列印時顯示）----
+function selectedOptionText(select) {
+  const o = select.options[select.selectedIndex];
+  return o ? o.textContent.trim() : '';
+}
+function describeFilters() {
+  const parts = [];
+  const kw = dom.searchInput.value.trim();
+  if (kw) parts.push(`關鍵字「${kw}」`);
+  if (dom.filterType.value !== 'ALL') parts.push(`類型：${selectedOptionText(dom.filterType)}`);
+  if (dom.filterStatus.value !== 'ALL') parts.push(`狀態：${selectedOptionText(dom.filterStatus).replace(/^[^一-鿿]+/, '')}`);
+  if (dom.filterDate.value !== 'ALL') parts.push(`日期：${selectedOptionText(dom.filterDate)}`);
+  return parts.length ? parts.join('；') : '無（顯示全部紀錄）';
+}
+function updatePrintHeader() {
+  if (!dom.printHeader) return;
+  const count = getFilteredRecords().length;
+  dom.printHeader.innerHTML =
+    '<div class="print-title">美和科技大學收發室 信件登記清冊</div>' +
+    `<div class="print-meta">列印時間：${escapeHtml(formatCurrentDateTime())}　｜　共 ${count} 筆</div>` +
+    `<div class="print-meta">篩選條件：${escapeHtml(describeFilters())}</div>`;
 }
 
 // 匯出 CSV 檔 (加 UTF-8 BOM 避免 Excel 亂碼)
@@ -802,14 +1143,14 @@ function exportToCsv() {
   ];
 
   const csvRows = [];
-  csvRows.push(headers.map(cleanCsvField).join(','));
+  csvRows.push(headers.map(MailBackupCore.toCsvField).join(','));
 
   filtered.forEach((r, idx) => {
     const statusText = r.status === 'RECEIVED' ? '已領取' : '待領取';
     const row = [
       idx + 1,
       statusText,
-      r.trackingNo || '',
+      null,                 // 編號欄於下方以 ="…" 文字格式輸出
       r.mailType || '',
       r.recipient || '',
       r.department || '',
@@ -819,8 +1160,10 @@ function exportToCsv() {
       r.receivedSigner || '',
       r.receivedAt || '',
       r.remark || ''
-    ];
-    csvRows.push(row.map(cleanCsvField).join(','));
+    ].map(MailBackupCore.toCsvField);
+    // 編號：="9820012345"，Excel 會當成文字（不變科學記號、不掉開頭的 0）
+    row[2] = MailBackupCore.toCsvTextFormula(r.trackingNo);
+    csvRows.push(row.join(','));
   });
 
   const csvContent = '\uFEFF' + csvRows.join('\r\n');
@@ -945,6 +1288,7 @@ function openRestorePreview() {
   if (v.ok) renderRestoreDiff();
 
   dom.restoreModal.style.display = 'flex';
+  focusFirstField(dom.restoreModal);
 }
 
 function describeRecord(r) {
@@ -971,6 +1315,7 @@ function renderRestoreDiff() {
     lines.push(`<li>現有但備份中沒有 <span class="${s.removed ? 'danger' : 'num'}">${s.removed}</span> 筆：<strong>將被移除</strong></li>`);
   }
   if (s.duplicateInBackup) lines.push(`<li>備份檔內重複 ${s.duplicateInBackup} 筆（不重複匯入）</li>`);
+  if (s.idsFixed) lines.push(`<li>將自動補上 <span class="num">${s.idsFixed}</span> 筆 ID（備份中缺少或重複的 ID；原始備份檔不會被修改）</li>`);
   lines.push('</ul>');
 
   const detail = (title, items, fmt) => {
@@ -1009,6 +1354,7 @@ function openIntegrityModal() {
   if (res.issues.length > LIMIT) shown.push(`<div class="restore-note">…另有 ${res.issues.length - LIMIT} 項未列出</div>`);
   document.getElementById('integrityIssues').innerHTML = shown.join('');
   document.getElementById('integrityModal').style.display = 'flex';
+  focusFirstField(document.getElementById('integrityModal'));
 }
 
 function closeIntegrityModal() {
@@ -1088,14 +1434,16 @@ function executeRestore() {
   showToast(`✅ 還原完成並通過驗證：目前共 ${result.verification.count} 筆，新增 ${s.added} 筆${note}。`, 'success');
 }
 
-function cleanCsvField(val) {
-  if (val === null || val === undefined) return '""';
-  const stringVal = String(val).replace(/"/g, '""');
-  return `"${stringVal}"`;
-}
-
 // 載入示範測試資料
 function loadSampleData() {
+  // 示範資料只用於全新、完全沒有紀錄的系統；已有紀錄時不可混入正式資料
+  if (records.length > 0) {
+    showToast('系統內已有紀錄，不可載入示範資料（避免混入正式紀錄）。', 'error');
+    return;
+  }
+  if (!confirm('示範資料寫入後無法刪除（本系統不提供刪除功能）。\n\n確定要載入 6 筆示範資料嗎？')) return;
+
+  const runId = Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
   const sampleNow = new Date();
   const timeMinusMins = (mins) => {
     return formatCurrentDateTime(new Date(sampleNow.getTime() - mins * 60000));
@@ -1188,8 +1536,12 @@ function loadSampleData() {
     }
   ];
 
+  // 每次載入產生唯一 ID（SAMPLE_<批次>_<序號>），避免重複載入造成相同 ID
+  sampleList.forEach(s => { s.id = s.id.replace('SAMPLE_', `SAMPLE_${runId}_`); });
+
+  const previous = records;
   records = sampleList.concat(records);
-  saveRecords();
+  if (!persistOrRollback(() => { records = previous; })) return;
   renderTable();
   updateStats();
   showToast('已成功匯入 6 筆示範測試紀錄！', 'success');
@@ -1264,7 +1616,9 @@ function openSummaryModal() {
     dom.summarySortOrder.value = 'ASC';
   }
 
+  summaryPage = 1;
   dom.summaryModal.style.display = 'flex';
+  focusFirstField(dom.summaryModal);
   renderSummaryCanvas();
 }
 
@@ -1278,7 +1632,7 @@ function onSummaryDateFilterChange() {
   } else {
     dom.summaryCustomDateGroup.style.display = 'none';
   }
-  renderSummaryCanvas();
+  onSummaryFilterChange();
 }
 
 function getSummaryData() {
@@ -1316,10 +1670,10 @@ function getSummaryData() {
     dateSlug = '全期間';
   }
 
-  const filtered = records.filter(item => {
+  const filtered = validRecords().filter(item => {
     // 日期過濾
     if (targetDatePrefix) {
-      if (!item.createdAt || !item.createdAt.startsWith(targetDatePrefix)) {
+      if (!textOf(item.createdAt).startsWith(targetDatePrefix)) {
         return false;
       }
     }
@@ -1333,8 +1687,8 @@ function getSummaryData() {
   // 按照當日資料建立日期和時間排序 (預設由早到晚，舊至新)
   const sortOrder = dom.summarySortOrder ? dom.summarySortOrder.value : 'ASC';
   filtered.sort((a, b) => {
-    const timeA = a.createdAt || '';
-    const timeB = b.createdAt || '';
+    const timeA = textOf(a.createdAt);
+    const timeB = textOf(b.createdAt);
     return sortOrder === 'DESC' ? timeB.localeCompare(timeA) : timeA.localeCompare(timeB);
   });
 
@@ -1342,55 +1696,104 @@ function getSummaryData() {
     items: filtered,
     dateDisplay: dateDisplay,
     dateSlug: dateSlug,
+    dateMode: dateMode,
+    statusMode: statusMode,
     statusText: statusMode === 'PENDING' ? '待領取郵件' : '全部郵件'
   };
 }
 
-function renderSummaryCanvas() {
+// 目前畫布所呈現的頁面資訊（下載檔名使用）
+let summaryPage = 1;
+let summaryRenderToken = 0;
+let summaryView = { page: 1, pages: 1, dateSlug: '' };
+
+// 篩選條件改變：回到第 1 頁重新繪製
+function onSummaryFilterChange() {
+  summaryPage = 1;
+  renderSummaryCanvas();
+}
+
+function changeSummaryPage(delta) {
+  summaryPage += delta;
+  renderSummaryCanvas();
+}
+
+// 等待字型載入完成再繪製，避免用到備用字型（最多等 3 秒，離線時不會卡住）
+async function ensureFontsReady() {
+  if (!document.fonts || !document.fonts.load) return;
+  const wait = Promise.all([
+    document.fonts.load('bold 28px "Noto Sans TC"', '美和收件人'),
+    document.fonts.load('500 18px "Noto Sans TC"', '美和收件人'),
+    document.fonts.ready
+  ]).catch(() => {});
+  await Promise.race([wait, new Promise(resolve => setTimeout(resolve, 3000))]);
+}
+
+// 文字過長時截斷並加「…」，避免壓到隔壁欄位（需先設定好 ctx.font）
+function fitText(ctx, text, maxWidth) {
+  const s = textOf(text);
+  if (ctx.measureText(s).width <= maxWidth) return s;
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(s.slice(0, mid) + '…').width <= maxWidth) lo = mid; else hi = mid - 1;
+  }
+  return s.slice(0, lo) + '…';
+}
+
+// 依筆數找出多數經手人；沒有任何經手人資料時回傳 null（畫面顯示「—」，不寫死人名）
+function dominantHandlerOf(items) {
+  const counts = {};
+  items.forEach(item => {
+    const h = textOf(item.handler).trim();
+    if (h) counts[h] = (counts[h] || 0) + 1;
+  });
+  let best = null;
+  let max = -1;
+  for (const [name, count] of Object.entries(counts)) {
+    if (count > max) { max = count; best = name; }
+  }
+  return best;
+}
+
+async function renderSummaryCanvas() {
+  const token = ++summaryRenderToken;
   const summary = getSummaryData();
-  const items = summary.items;
+  const paged = MailBackupCore.paginate(summary.items, SUMMARY_PAGE_SIZE, summaryPage);
+  summaryPage = paged.page;
+  const items = paged.items;
+
   if (dom.summaryRecordsCountTag) {
-    dom.summaryRecordsCountTag.textContent = `符合 ${items.length} 筆`;
+    dom.summaryRecordsCountTag.textContent = paged.pages > 1
+      ? `符合 ${paged.total} 筆（每張圖最多 ${SUMMARY_PAGE_SIZE} 筆，共 ${paged.pages} 張）`
+      : `符合 ${paged.total} 筆`;
+  }
+  if (dom.summaryPager) {
+    dom.summaryPager.style.display = paged.pages > 1 ? 'flex' : 'none';
+    dom.summaryPageInfo.textContent = `第 ${paged.page} / ${paged.pages} 頁`;
+    dom.btnSummaryPrev.disabled = paged.page <= 1;
+    dom.btnSummaryNext.disabled = paged.page >= paged.pages;
   }
 
   const canvas = dom.summaryCanvas;
   if (!canvas) return;
+
+  await ensureFontsReady();
+  if (token !== summaryRenderToken) return;   // 期間又有新的繪製請求，放棄這一次
+
   const ctx = canvas.getContext('2d');
+  const FONT = '"Noto Sans TC", "Microsoft JhengHei", sans-serif';
 
-  // ==========================================
-  // 計算當天 / 篩選郵件中之多數經手人 (製表人)
-  // ==========================================
-  const handlerCounts = {};
-  items.forEach(item => {
-    const h = (item.handler || '').trim();
-    if (h) {
-      handlerCounts[h] = (handlerCounts[h] || 0) + 1;
-    }
-  });
-
-  // 若當前篩選項目為 0 筆，從該日期全體登記郵件中尋找
-  if (Object.keys(handlerCounts).length === 0) {
-    const targetDatePrefix = summary.dateSlug && summary.dateSlug.length === 10 ? summary.dateSlug : '';
-    records.forEach(item => {
-      if (targetDatePrefix && item.createdAt && item.createdAt.startsWith(targetDatePrefix)) {
-        const h = (item.handler || '').trim();
-        if (h) handlerCounts[h] = (handlerCounts[h] || 0) + 1;
-      }
-    });
+  // 製表人：以「整個篩選結果」中經手次數最多者；若篩選結果為空，改看該日期全部登記
+  let dominantHandler = dominantHandlerOf(summary.items);
+  if (!dominantHandler && summary.dateSlug && summary.dateSlug.length === 10) {
+    dominantHandler = dominantHandlerOf(
+      validRecords().filter(r => textOf(r.createdAt).startsWith(summary.dateSlug)));
   }
-
-  // 找出人數最多之經手人
-  let dominantHandler = '魏啟軒'; // 預設
-  let maxCount = -1;
-  for (const [name, count] of Object.entries(handlerCounts)) {
-    if (count > maxCount) {
-      maxCount = count;
-      dominantHandler = name;
-    }
-  }
+  const handlerText = dominantHandler || NO_NAME_TEXT;
 
   // ==========================================
-  // 依收件人資料筆數動態縮放圖片高度與比例
+  // 依本頁資料筆數動態縮放圖片高度與比例
   // ==========================================
   const logicalWidth = 920;
   const headerHeight = 155;
@@ -1426,18 +1829,21 @@ function renderSummaryCanvas() {
   ctx.fillRect(0, headerHeight - 4, logicalWidth, 4);
 
   // 系統標題
-  ctx.font = 'bold 28px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  ctx.font = `bold 28px ${FONT}`;
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'left';
   ctx.fillText('美和科技大學收發室 信件 / 包裹收件摘要', 36, 54);
 
   // 篩選與日期資訊
-  ctx.font = '500 18px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  const pageNote = paged.pages > 1 ? `　｜　第 ${paged.page}/${paged.pages} 頁` : '';
+  ctx.font = `500 18px ${FONT}`;
   ctx.fillStyle = '#ccfbf1';
-  ctx.fillText(`📅 收件日期：${summary.dateDisplay}　｜　類別狀態：${summary.statusText}　｜　總計：${items.length} 筆`, 36, 96);
+  ctx.fillText(
+    fitText(ctx, `📅 收件日期：${summary.dateDisplay}　｜　類別狀態：${summary.statusText}　｜　總計：${paged.total} 筆${pageNote}`, logicalWidth - 72),
+    36, 96);
 
   // 提醒備註
-  ctx.font = '400 15px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  ctx.font = `400 15px ${FONT}`;
   ctx.fillStyle = '#a7f3d0';
   ctx.fillText('🔔 敬請以下名單之師生同仁於上班時間攜帶證件或印章至收發室簽收領取。', 36, 132);
 
@@ -1449,29 +1855,33 @@ function renderSummaryCanvas() {
   ctx.fillStyle = '#b2e2dd';
   ctx.fillRect(0, thY + tableHeaderHeight - 1, logicalWidth, 1);
 
-  // 3 大欄位 X 座標設定
-  const col1X = 50;  // 收件人姓名
-  const col2X = 330; // 收件人單位
-  const col3X = 680; // 郵件類型
+  // 3 大欄位 X 座標與可用寬度
+  const col1X = 50;  const col1W = 260;  // 收件人姓名
+  const col2X = 330; const col2W = 330;  // 收件人單位
+  const col3X = 680; const col3W = 204;  // 郵件類型
 
-  ctx.font = 'bold 18px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  ctx.font = `bold 18px ${FONT}`;
   ctx.fillStyle = '#006d77';
   ctx.textAlign = 'left';
   ctx.fillText('收件人姓名', col1X, thY + 34);
   ctx.fillText('收件人單位', col2X, thY + 34);
   ctx.fillText('郵件類型', col3X, thY + 34);
 
-  // 4. 資料列繪製 (依項目高度動態向下延伸，確保每列清晰可見)
+  // 4. 資料列繪製
   let currentY = thY + tableHeaderHeight;
 
   if (items.length === 0) {
-    // 無資料提示
+    // 無資料提示：依實際篩選條件顯示日期與狀態，不固定寫「本日」
+    const word = summary.statusMode === 'PENDING' ? '待領取之' : '';
+    const emptyText = summary.dateMode === 'ALL'
+      ? `📌 歷史全期間尚無${word}信件或包裹登記紀錄`
+      : `📌 ${summary.dateDisplay} 尚無${word}信件或包裹登記紀錄`;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, currentY, logicalWidth, rowHeight);
-    ctx.font = '500 17px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+    ctx.font = `500 17px ${FONT}`;
     ctx.fillStyle = '#94a3b8';
     ctx.textAlign = 'center';
-    ctx.fillText('📌 本日（指定篩選條件）尚無信件或包裹登記紀錄', logicalWidth / 2, currentY + 32);
+    ctx.fillText(fitText(ctx, emptyText, logicalWidth - 72), logicalWidth / 2, currentY + 32);
     currentY += rowHeight;
   } else {
     items.forEach((item, index) => {
@@ -1483,19 +1893,20 @@ function renderSummaryCanvas() {
       ctx.fillStyle = '#e2e8f0';
       ctx.fillRect(0, currentY + rowHeight - 1, logicalWidth, 1);
 
-      // 欄位 1: 收件人姓名 (粗體黑字)
-      ctx.font = 'bold 19px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+      // 欄位 1: 收件人姓名 (粗體黑字)；過長則截斷加「…」
+      ctx.font = `bold 19px ${FONT}`;
       ctx.fillStyle = '#0f172a';
       ctx.textAlign = 'left';
-      ctx.fillText(item.recipient || '--', col1X, currentY + 33);
+      ctx.fillText(fitText(ctx, item.recipient || '--', col1W), col1X, currentY + 33);
 
       // 欄位 2: 收件人單位 (深灰字)
-      ctx.font = '500 18px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+      ctx.font = `500 18px ${FONT}`;
       ctx.fillStyle = '#334155';
-      ctx.fillText(item.department || '--', col2X, currentY + 33);
+      ctx.fillText(fitText(ctx, item.department || '--', col2W), col2X, currentY + 33);
 
       // 欄位 3: 郵件類型 (帶有優雅孔雀綠圓角標籤)
-      const badgeText = item.mailType || '一般掛號';
+      ctx.font = `600 15px ${FONT}`;
+      const badgeText = fitText(ctx, item.mailType || '一般掛號', col3W - 24);
       const badgeWidth = Math.max(92, ctx.measureText(badgeText).width + 24);
       const badgeHeight = 30;
       const badgeX = col3X;
@@ -1511,7 +1922,6 @@ function renderSummaryCanvas() {
       ctx.stroke();
 
       // 標籤文字
-      ctx.font = '600 15px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
       ctx.fillStyle = '#006d77';
       ctx.textAlign = 'center';
       ctx.fillText(badgeText, badgeX + badgeWidth / 2, badgeY + 21);
@@ -1527,16 +1937,18 @@ function renderSummaryCanvas() {
   ctx.fillStyle = '#cbd5e1';
   ctx.fillRect(0, currentY, logicalWidth, 1);
 
-  // 製表人動態顯示：若當天經手人魏啟軒居多就顯示"製表人：魏啟軒"，依此類推
-  ctx.font = 'bold 16px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  // 製表人動態顯示：依篩選結果中經手次數最多者；查無資料時顯示「—」
+  ctx.font = `bold 16px ${FONT}`;
   ctx.fillStyle = '#1e293b';
   ctx.textAlign = 'left';
-  ctx.fillText(`美和科技大學收發室　製表人：${dominantHandler}`, 36, currentY + 36);
+  ctx.fillText(fitText(ctx, `美和科技大學收發室　製表人：${handlerText}`, 520), 36, currentY + 36);
 
-  ctx.font = '500 14px "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  ctx.font = `500 14px ${FONT}`;
   ctx.fillStyle = '#64748b';
   ctx.textAlign = 'right';
   ctx.fillText(`產製時間：${formatCurrentDateTime().slice(0, 16)}`, logicalWidth - 36, currentY + 36);
+
+  summaryView = { page: paged.page, pages: paged.pages, dateSlug: summary.dateSlug };
 }
 
 // 輔助繪製圓角矩形
@@ -1559,8 +1971,10 @@ function downloadSummaryImage() {
   const canvas = dom.summaryCanvas;
   if (!canvas) return;
 
+  // 多張圖時，檔名加上頁碼（例如 _第1頁.png），避免後一張覆蓋前一張
   const summary = getSummaryData();
-  const fileName = `美和科技大學_收件摘要_${summary.dateSlug}.png`;
+  const pageTag = summaryView.pages > 1 ? `_第${summaryView.page}頁` : '';
+  const fileName = `美和科技大學_收件摘要_${summary.dateSlug}${pageTag}.png`;
 
   const link = document.createElement('a');
   link.download = fileName;
@@ -1624,6 +2038,7 @@ function openSignSheetModal() {
   dom.signSheetRowHeight.value = 'spacious';
 
   dom.signSheetModal.style.display = 'flex';
+  focusFirstField(dom.signSheetModal);
   renderSignSheetPreview();
 }
 
@@ -1670,10 +2085,10 @@ function getSignSheetData() {
     dateDisplay = '歷史全期間';
   }
 
-  const filtered = records.filter(item => {
+  const filtered = validRecords().filter(item => {
     // 日期過濾
     if (targetDatePrefix) {
-      if (!item.createdAt || !item.createdAt.startsWith(targetDatePrefix)) {
+      if (!textOf(item.createdAt).startsWith(targetDatePrefix)) {
         return false;
       }
     }
@@ -1687,14 +2102,16 @@ function getSignSheetData() {
   // 嚴格依資料建立日期和時間排序 (預設由早到晚，符合簽收表登記順序)
   const sortOrder = dom.signSheetSortOrder ? dom.signSheetSortOrder.value : 'ASC';
   filtered.sort((a, b) => {
-    const timeA = a.createdAt || '';
-    const timeB = b.createdAt || '';
+    const timeA = textOf(a.createdAt);
+    const timeB = textOf(b.createdAt);
     return sortOrder === 'DESC' ? timeB.localeCompare(timeA) : timeA.localeCompare(timeB);
   });
 
   return {
     items: filtered,
     dateDisplay: dateDisplay,
+    dateMode: dateMode,
+    statusMode: statusMode,
     statusText: statusMode === 'PENDING' ? '待領取信件/包裹 (現場親筆簽名)' : '全部信件/包裹 (含已簽收備查)'
   };
 }
@@ -1711,29 +2128,22 @@ function renderSignSheetPreview() {
   const container = dom.a4PaperPreview;
   if (!container) return;
 
-  // 計算多數經手人
-  const handlerCounts = {};
-  items.forEach(item => {
-    const h = (item.handler || '').trim();
-    if (h) handlerCounts[h] = (handlerCounts[h] || 0) + 1;
-  });
-  let dominantHandler = '魏啟軒';
-  let maxCount = -1;
-  for (const [name, count] of Object.entries(handlerCounts)) {
-    if (count > maxCount) {
-      maxCount = count;
-      dominantHandler = name;
-    }
-  }
+  // 計算多數經手人；沒有資料時顯示「—」，不寫死人名
+  const dominantHandler = dominantHandlerOf(items) || NO_NAME_TEXT;
 
   // 產生表格列 HTML (欄位順序：郵件類型 -> 寄件人 -> 收件人 -> 收件人單位 -> 編號 -> 簽名欄)
   let tableRowsHtml = '';
 
   if (items.length === 0) {
+    // 依實際篩選條件說明，不固定寫「本日」
+    const word = sheetData.statusMode === 'PENDING' ? '待領取之' : '';
+    const emptyMsg = sheetData.dateMode === 'ALL'
+      ? `目前沒有${word || '任何'}信件或包裹`
+      : `${sheetData.dateDisplay}尚無${word}信件或包裹`;
     tableRowsHtml = `
       <tr>
         <td colspan="6" style="text-align: center; padding: 40px 10px; color: #64748b; font-size: 15px;">
-          📌 本日（指定篩選條件）尚無待領取之信件或包裹
+          📌 ${escapeHtml(emptyMsg)}
         </td>
       </tr>
     `;

@@ -1058,6 +1058,23 @@ select:focus {
 .restore-box details ul { max-height: 160px; overflow: auto; font-size: 13px; }
 .restore-note { margin-top: 12px; font-size: 13px; color: var(--text-muted); }
 
+/* 列印清冊抬頭：畫面上不顯示，僅列印時出現 */
+.print-only { display: none; }
+
+/* 收件摘要圖片分頁列 */
+.summary-pager {
+  display: flex; align-items: center; justify-content: center; gap: 16px;
+  margin: 0 0 12px; font-weight: 600; color: var(--peacock-primary-dark);
+}
+.summary-pager .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 修改／簽收視窗：資料已在其他分頁更新的提醒 */
+.modal-stale-note {
+  margin-bottom: 12px; padding: 10px 14px; font-size: 14px; font-weight: 600;
+  border: 1px solid #fdba74; border-left: 5px solid #ea580c; border-radius: var(--radius-sm);
+  background: #fff7ed; color: #9a3412;
+}
+
 /* 列印專用樣式 */
 @media print {
   /* 當為直式 A4 簽收表列印模式時 */
@@ -1158,6 +1175,10 @@ select:focus {
   body:not(.printing-a4-sign-sheet) .action-buttons,
   body:not(.printing-a4-sign-sheet) .table-footer,
   body:not(.printing-a4-sign-sheet) .cell-actions,
+  body:not(.printing-a4-sign-sheet) .col-actions-th,
+  body:not(.printing-a4-sign-sheet) .data-alert-bar,
+  body:not(.printing-a4-sign-sheet) .backup-status-bar,
+  body:not(.printing-a4-sign-sheet) #emptyState,
   body:not(.printing-a4-sign-sheet) .system-footer,
   body:not(.printing-a4-sign-sheet) .modal-overlay,
   body:not(.printing-a4-sign-sheet) .toast {
@@ -1190,6 +1211,14 @@ select:focus {
     border: 1px solid #ccc;
     font-size: 11pt;
   }
+
+  /* 清冊抬頭：標題、列印時間、篩選條件 */
+  body:not(.printing-a4-sign-sheet) .print-only { display: block; }
+  body:not(.printing-a4-sign-sheet) .print-header { margin: 0 0 10px; color: #000; }
+  body:not(.printing-a4-sign-sheet) .print-header .print-title {
+    font-size: 18pt; font-weight: 700; text-align: center; margin-bottom: 6px;
+  }
+  body:not(.printing-a4-sign-sheet) .print-header .print-meta { font-size: 10.5pt; margin: 2px 0; }
 }
 
 @page {

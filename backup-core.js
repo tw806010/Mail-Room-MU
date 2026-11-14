@@ -16,6 +16,12 @@
     const storage = opts.storage;
     const key = opts.key || STORAGE_KEY;
 
+    // 「寫入前比對」用：記住最近一次讀取／寫入時儲存內容的原始字串（null 表示當時沒有資料）。
+    // synced=false 代表尚未讀取過，此時不比對（維持舊行為）。
+    let lastRaw = null;
+    let synced = false;
+    const normRaw = (r) => (r === undefined || r === '' ? null : r);
+
     // 讀取：回傳 { records, status, raw, error }
     // status: 'ok' | 'empty' | 'corrupt'；損毀時不修改儲存內容，保留 raw 供搶救
     function load() {
@@ -25,6 +31,8 @@
       } catch (err) {
         return { records: [], status: 'corrupt', raw: null, error: err };
       }
+      lastRaw = normRaw(raw);
+      synced = true;
       if (raw === null || raw === undefined || raw === '') {
         return { records: [], status: 'empty', raw: raw, error: null };
       }
@@ -39,10 +47,22 @@
       }
     }
 
-    // 寫入：回傳 { ok, error }，不拋出例外
+    // 寫入：回傳 { ok, error, code? }，不拋出例外。
+    // 寫入前先比對儲存內容是否仍等於上次讀取／寫入的內容；若已被其他分頁改動，
+    // 拒絕寫入並回傳 { ok:false, code:'STALE_DATA' }，絕不默默覆蓋。
     function save(records) {
       try {
-        storage.setItem(key, JSON.stringify(records));
+        if (synced) {
+          let current = null;
+          try { current = normRaw(storage.getItem(key)); } catch (e) { current = lastRaw; }
+          if (current !== lastRaw) {
+            return { ok: false, code: 'STALE_DATA', error: new Error('儲存內容已被其他視窗或分頁更新') };
+          }
+        }
+        const text = JSON.stringify(records);
+        storage.setItem(key, text);
+        lastRaw = text;
+        synced = true;
         return { ok: true, error: null };
       } catch (err) {
         return { ok: false, error: err };
@@ -58,6 +78,8 @@
         } else {
           storage.setItem(key, raw);
         }
+        lastRaw = normRaw(raw);
+        synced = true;
         return { ok: true, error: null };
       } catch (err) {
         return { ok: false, error: err };
@@ -502,8 +524,63 @@
    * 預先計算還原後的結果（純函式，不寫入）。mode: 'merge' | 'replace'
    * 回傳 { mode, resultRecords, summary }
    */
-  function planRestore(current, incoming, mode) {
+  // 產生新的唯一 ID，格式同登記時的 'MAIL_' + 時間戳 + '_' + 隨機碼
+  function defaultIdFactory() {
+    return 'MAIL_' + Date.now() + '_' + Math.floor(Math.random() * 1000000);
+  }
+
+  /**
+   * 為缺少 ID（空值／非字串）或 ID 與前面紀錄重複的備份紀錄補上新的唯一 ID。
+   * 不修改傳入的陣列與物件（被補 ID 的紀錄會以複本取代）。
+   * reservedIds：不可使用的既有 ID（例如目前系統內的 ID）。
+   * 回傳 { records, generatedIds:Set, fixedMissing, fixedDuplicate }
+   */
+  function ensureUniqueIds(records, options) {
+    const opts = options || {};
+    const factory = opts.idFactory || defaultIdFactory;
+    const used = new Set(opts.reservedIds || []);
+    const generatedIds = new Set();
+    let fixedMissing = 0, fixedDuplicate = 0;
+    const seen = new Set();
+
+    const fresh = () => {
+      let id;
+      let guard = 0;
+      do { id = factory(); guard++; } while ((used.has(id) || seen.has(id)) && guard < 1000);
+      if (used.has(id) || seen.has(id)) id = id + '_' + guard; // 工廠一直回傳相同值時的保險
+      return id;
+    };
+
+    // 先登記所有「有效且第一次出現」的 ID，避免新 ID 撞到後面才出現的既有 ID
+    const firstIdx = new Map();
+    records.forEach((r, i) => {
+      if (isRec(r) && typeof r.id === 'string' && r.id.trim() !== '' && !firstIdx.has(r.id)) firstIdx.set(r.id, i);
+    });
+    firstIdx.forEach((i, id) => seen.add(id));
+
+    const out = records.map((r, i) => {
+      if (!isRec(r)) return r;
+      const hasId = typeof r.id === 'string' && r.id.trim() !== '';
+      if (hasId && firstIdx.get(r.id) === i) return r;
+      const id = fresh();
+      seen.add(id);
+      generatedIds.add(id);
+      if (hasId) fixedDuplicate++; else fixedMissing++;
+      return Object.assign({}, r, { id });
+    });
+    return { records: out, generatedIds, fixedMissing, fixedDuplicate };
+  }
+
+  function planRestore(current, incomingRaw, mode, options) {
     if (mode !== 'merge' && mode !== 'replace') throw new Error('未知的還原模式：' + mode);
+    // 備份檔中缺 ID／ID 重複的紀錄，先補上新的唯一 ID（原始備份內容不被修改）
+    const reserved = [];
+    current.forEach(r => { if (isRec(r) && typeof r.id === 'string') reserved.push(r.id); });
+    const fixed = ensureUniqueIds(incomingRaw, {
+      reservedIds: reserved, idFactory: options && options.idFactory
+    });
+    const incoming = fixed.records;
+
     const diff = diffRecords(current, incoming);
     let resultRecords;
     const summary = {
@@ -512,11 +589,12 @@
       identical: diff.identical.length,
       changedFound: diff.changed.length,
       duplicateInBackup: diff.duplicateInBackup.length,
-      overwritten: 0, removed: 0, keptCurrent: 0, after: 0
+      overwritten: 0, removed: 0, keptCurrent: 0, after: 0, idsFixed: 0
     };
     if (mode === 'merge') {
       resultRecords = current.concat(diff.added);
-      resultRecords.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      const t = (x) => (isRec(x) && typeof x.createdAt === 'string' ? x.createdAt : '');
+      resultRecords.sort((a, b) => t(b).localeCompare(t(a)));
       summary.keptCurrent = diff.changed.length; // 合併時衝突一律保留現有版本
     } else {
       resultRecords = incoming.slice();
@@ -524,6 +602,8 @@
       summary.removed = diff.onlyInCurrent.length;
     }
     summary.after = resultRecords.length;
+    // 只計算真的會寫入結果的紀錄（合併時被判定為重複而略過的不算）
+    summary.idsFixed = resultRecords.filter(r => isRec(r) && fixed.generatedIds.has(r.id)).length;
     return { mode, resultRecords, summary, diff };
   }
 
@@ -561,6 +641,9 @@
     const plan = planRestore(baseRecords, incoming, mode);
 
     const w = store.save(plan.resultRecords);
+    if (!w.ok && w.code === 'STALE_DATA') {
+      return fail('write', 'STALE_DATA', '儲存的資料剛剛被其他視窗修改，為避免覆蓋已中止，請重新整理頁面後再試', { plan });
+    }
     if (!w.ok) {
       // 寫入失敗：setItem 未成功，原資料應保持不變，仍檢查一次
       const chk = store.load();
@@ -666,7 +749,81 @@
     return { list, stash, clear, key };
   }
 
+  // ---------------------------------------------------------------
+  // CSV 匯出（防 Excel 科學記號與公式注入）
+  // ---------------------------------------------------------------
+  const CSV_FORMULA_START = /^[=+\-@\t\r\n]/;
+
+  // 一般欄位：以 = + - @ Tab 或換行開頭者，前面加單引號避免被當成公式
+  function toCsvField(val) {
+    if (val === null || val === undefined) return '""';
+    let s = String(val);
+    if (CSV_FORMULA_START.test(s)) s = "'" + s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  // 編號欄：輸出為 ="9820012345"，Excel 會視為文字（保留開頭的 0、避免科學記號）。
+  // 內容中的雙引號會加倍，字串字面值內的 = + - @ 不會被當成公式執行。
+  function toCsvTextFormula(val) {
+    if (val === null || val === undefined || val === '') return '""';
+    const inner = String(val).replace(/[\r\n]+/g, ' ').replace(/"/g, '""');   // Excel 公式內的字串字面值
+    const formula = '="' + inner + '"';
+    return '"' + formula.replace(/"/g, '""') + '"';                          // 再依 CSV 規則包一層
+  }
+
+  // ---------------------------------------------------------------
+  // 登記防呆：相同編號且待領取的既有紀錄
+  // ---------------------------------------------------------------
+  function findPendingDuplicate(records, trackingNo) {
+    const t = String(trackingNo === null || trackingNo === undefined ? '' : trackingNo).trim().toLowerCase();
+    if (!t || !Array.isArray(records)) return null;
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      if (isRec(r) && r.status === 'PENDING' && String(r.trackingNo === undefined || r.trackingNo === null ? '' : r.trackingNo).trim().toLowerCase() === t) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------
+  // 分頁（收件摘要圖片：每張圖最多 N 筆）
+  // ---------------------------------------------------------------
+  function paginate(items, pageSize, page) {
+    const size = Math.max(1, pageSize | 0);
+    const total = items.length;
+    const pages = Math.max(1, Math.ceil(total / size));
+    const p = Math.min(Math.max(1, page | 0 || 1), pages);
+    const start = (p - 1) * size;
+    return { page: p, pages, pageSize: size, total, start, items: items.slice(start, start + size) };
+  }
+
+  // ---------------------------------------------------------------
+  // 異動紀錄（updatedAt / history，皆為選填新增欄位）
+  // ---------------------------------------------------------------
+  const TRACKED_FIELDS = COMPARE_FIELDS;
+
+  // 比較兩個紀錄物件的追蹤欄位，回傳 { 欄位: { from, to } }（沒有差異則為空物件）
+  function diffFields(before, after) {
+    const changes = {};
+    TRACKED_FIELDS.forEach(f => {
+      if (norm(before[f]) !== norm(after[f])) changes[f] = { from: norm(before[f]), to: norm(after[f]) };
+    });
+    return changes;
+  }
+
+  // 在紀錄上加入一筆異動（就地修改該紀錄物件）。changes 為空時不記錄，回傳 false。
+  function appendHistory(record, action, changes, at) {
+    if (!changes || Object.keys(changes).length === 0) return false;
+    if (!Array.isArray(record.history)) record.history = [];
+    record.history.push({ at, action, changes });
+    record.updatedAt = at;
+    return true;
+  }
+
   const api = {
+    ensureUniqueIds, toCsvField, toCsvTextFormula, findPendingDuplicate, paginate,
+    diffFields, appendHistory, TRACKED_FIELDS,
     STORAGE_KEY, createStore,
     MAIL_TYPES, STATUSES, parseDateTime, checkIntegrity,
     BACKUP_SYSTEM_NAME, validateBackup,
