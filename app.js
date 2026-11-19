@@ -11,9 +11,34 @@ const STORAGE_KEY = 'meiho_mailroom_records_v1';
 // 集中設定（郵件類型沿用核心模組；經手人名單於此維護）
 // ==========================================
 const MAIL_TYPES = MailBackupCore.MAIL_TYPES;
-const HANDLERS = ['陳銘鴻', '魏啟軒'];      // 固定經手人名單
-const HANDLER_OTHER = '其他';              // 下拉選「其他」時，需手動輸入姓名
+const DEFAULT_HANDLERS = ['經手人A', '經手人B']; // 全新安裝且尚無紀錄時的預設名單（實際名單存於本機，可在「設定」維護）
+let HANDLERS = DEFAULT_HANDLERS.slice();         // 目前使用中的經手人名單（啟動時由 loadHandlers() 載入）
+const HANDLER_OTHER = MailBackupCore.HANDLER_OTHER_LABEL; // 下拉選「其他」時，需手動輸入姓名
 const SUMMARY_PAGE_SIZE = 40;              // 收件摘要圖片：每張圖最多筆數
+
+// 單號檢查規則（集中於此；實際郵件單號格式不同時，只需調整這裡）
+const TRACKING_RULES = {
+  minLength: 6,                 // 去除前後空白後的最短長度
+  maxLength: 30,                // 最長長度
+  allowed: /^[A-Za-z0-9-]+$/,   // 只允許英數字與連字號
+  messages: {
+    empty: '請輸入單號。',
+    format: '單號只能包含英文字母、數字與連字號（-），請檢查是否有空白或特殊符號。',
+    tooShort: (n) => `單號太短（至少 ${n} 個字元），請確認是否漏打。`,
+    tooLong: (n) => `單號太長（最多 ${n} 個字元），請確認是否重複輸入。`
+  }
+};
+
+// 檢查單號。回傳 { ok, value, message }；value 為去除前後空白後的單號
+function validateTrackingNo(raw) {
+  const value = textOf(raw).trim();
+  const m = TRACKING_RULES.messages;
+  if (!value) return { ok: false, value, message: m.empty };
+  if (!TRACKING_RULES.allowed.test(value)) return { ok: false, value, message: m.format };
+  if (value.length < TRACKING_RULES.minLength) return { ok: false, value, message: m.tooShort(TRACKING_RULES.minLength) };
+  if (value.length > TRACKING_RULES.maxLength) return { ok: false, value, message: m.tooLong(TRACKING_RULES.maxLength) };
+  return { ok: true, value, message: '' };
+}
 const NO_NAME_TEXT = '—';                  // 查無製表人／經手人時顯示
 
 // 系統狀態
@@ -79,6 +104,9 @@ const dom = {
   // 登記表單
   form: document.getElementById('mailRegisterForm'),
   trackingNo: document.getElementById('trackingNo'),
+  trackingError: document.getElementById('trackingError'),
+  trackingDup: document.getElementById('trackingDup'),
+  trackingDupText: document.getElementById('trackingDupText'),
   mailType: document.getElementById('mailType'),
   handlerSelect: document.getElementById('handlerSelect'),
   handlerOtherGroup: document.getElementById('handlerOtherGroup'),
@@ -179,6 +207,15 @@ const dom = {
   btnDoPrintSignSheet: document.getElementById('btnDoPrintSignSheet'),
   optSignSheetToday: document.getElementById('optSignSheetToday'),
   optSignSheetYesterday: document.getElementById('optSignSheetYesterday'),
+  // 設定 Modal（經手人名單）
+  settingsModal: document.getElementById('settingsModal'),
+  btnOpenSettings: document.getElementById('btnOpenSettings'),
+  btnSettingsClose: document.getElementById('btnSettingsClose'),
+  btnSettingsOk: document.getElementById('btnSettingsOk'),
+  handlerList: document.getElementById('handlerList'),
+  handlerAddForm: document.getElementById('handlerAddForm'),
+  handlerAddInput: document.getElementById('handlerAddInput'),
+  handlerAddError: document.getElementById('handlerAddError'),
   // Toast
   toast: document.getElementById('systemToast'),
   toastMessage: document.getElementById('toastMessage')
@@ -186,9 +223,11 @@ const dom = {
 
 // 初始化載入
 document.addEventListener('DOMContentLoaded', () => {
-  populateSelects();
   initClock();
   loadRecords();
+  loadHandlers();
+  populateSelects();
+  applyPrefsToForm();
   bindEvents();
   renderTable();
   updateStats();
@@ -215,6 +254,12 @@ function checkDayRollover() {
 // 多分頁同步：其他分頁修改了紀錄時，重新讀取並提醒使用者
 function onStorageEvent(e) {
   if (e.storageArea && e.storageArea !== window.localStorage) return;
+  if (e.key === MailBackupCore.HANDLERS_KEY) {   // 其他分頁修改了經手人名單：靜默同步
+    loadHandlers();
+    refreshHandlerSelects();
+    if (dom.settingsModal.style.display === 'flex') renderHandlerList();
+    return;
+  }
   if (e.key !== null && e.key !== STORAGE_KEY) return;   // key 為 null 代表整個儲存空間被清空
   reloadFromStorage();
   const editing = dom.editModal.style.display === 'flex';
@@ -261,7 +306,8 @@ const MODAL_CLOSERS = {
   restoreModal: () => closeRestoreModal(),
   integrityModal: () => closeIntegrityModal(),
   summaryModal: () => closeSummaryModal(),
-  signSheetModal: () => closeSignSheetModal()
+  signSheetModal: () => closeSignSheetModal(),
+  settingsModal: () => closeSettingsModal()
 };
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return;
@@ -318,6 +364,260 @@ function formatCurrentDateTime(dateObj = new Date()) {
 // 儲存層（backup-core.js 提供；行為與原本一致，僅抽象化以利測試）
 const recordStore = MailBackupCore.createStore({ storage: window.localStorage, key: STORAGE_KEY });
 const corruptStash = MailBackupCore.createCorruptStash({ storage: window.localStorage });
+
+// ==========================================
+// 經手人名單（存於本機獨立鍵，不改變紀錄格式）
+// ==========================================
+const handlerStore = MailBackupCore.createHandlerStore({ storage: window.localStorage });
+
+// 載入名單。從未儲存過時：優先由既有紀錄的 handler 欄位產生（程式碼內不含任何姓名），
+// 沒有紀錄才用預設名單。紀錄讀取失敗時不寫入，避免用不完整的資料產生名單。
+function loadHandlers() {
+  const stored = handlerStore.load();
+  if (stored.exists && stored.list.length > 0) {
+    HANDLERS = stored.list;
+    return;
+  }
+  const seeded = MailBackupCore.handlersFromRecords(records);
+  HANDLERS = seeded.length > 0 ? seeded : DEFAULT_HANDLERS.slice();
+  if (!dataAlerts.corrupt) handlerStore.save(HANDLERS);
+}
+
+// 名單變更後重建兩個經手人下拉選單，並盡量保留目前選取的值
+function refreshHandlerSelects() {
+  [dom.handlerSelect, dom.editHandlerSelect].forEach(sel => {
+    const current = sel.value;
+    fillSelect(sel, HANDLERS, { withOther: true });
+    if (HANDLERS.includes(current) || current === HANDLER_OTHER) sel.value = current;
+  });
+}
+
+function persistHandlers() {
+  if (!handlerStore.save(HANDLERS)) {
+    showToast('❌ 經手人名單儲存失敗（瀏覽器儲存空間不可用）。', 'error');
+    return false;
+  }
+  refreshHandlerSelects();
+  renderHandlerList();
+  return true;
+}
+
+function openSettingsModal() {
+  dom.handlerAddInput.value = '';
+  dom.handlerAddError.textContent = '';
+  renderHandlerList();
+  dom.settingsModal.style.display = 'flex';
+  dom.handlerAddInput.focus();
+}
+function closeSettingsModal() {
+  dom.settingsModal.style.display = 'none';
+}
+
+function renderHandlerList() {
+  dom.handlerList.innerHTML = '';
+  HANDLERS.forEach((name, i) => {
+    const li = document.createElement('li');
+    li.className = 'handler-item';
+    const span = document.createElement('span');
+    span.textContent = name;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-outline btn-sm';
+    btn.dataset.handlerIndex = String(i);
+    btn.textContent = '刪除';
+    btn.disabled = HANDLERS.length <= 1;   // 至少保留一位
+    btn.title = HANDLERS.length <= 1 ? '至少需要保留一位經手人' : '從下拉選單移除（過去的紀錄不受影響）';
+    li.appendChild(span);
+    li.appendChild(btn);
+    dom.handlerList.appendChild(li);
+  });
+}
+
+function onHandlerAdd(e) {
+  e.preventDefault();
+  const name = dom.handlerAddInput.value.trim();
+  let err = '';
+  if (!name) err = '請輸入經手人姓名。';
+  else if (name === HANDLER_OTHER) err = `「${HANDLER_OTHER}」為系統保留字，請改用其他名稱。`;
+  else if (name.length > MailBackupCore.HANDLER_MAX_LENGTH) err = `姓名請勿超過 ${MailBackupCore.HANDLER_MAX_LENGTH} 個字。`;
+  else if (HANDLERS.includes(name)) err = '此經手人已在名單中。';
+  dom.handlerAddError.textContent = err;
+  if (err) { dom.handlerAddInput.focus(); return; }
+  HANDLERS = HANDLERS.concat(name);
+  if (persistHandlers()) {
+    dom.handlerAddInput.value = '';
+    dom.handlerAddInput.focus();
+  } else {
+    HANDLERS = HANDLERS.filter(h => h !== name);
+  }
+}
+
+function onHandlerListClick(e) {
+  const btn = e.target.closest('button[data-handler-index]');
+  if (!btn || btn.disabled || HANDLERS.length <= 1) return;
+  const idx = Number(btn.dataset.handlerIndex);
+  const name = HANDLERS[idx];
+  if (name === undefined) return;
+  if (!confirm(`確定要從名單移除「${name}」嗎？\n過去已登記的紀錄不會被更動。`)) return;
+  const previous = HANDLERS;
+  HANDLERS = HANDLERS.filter((_, i) => i !== idx);
+  if (!persistHandlers()) HANDLERS = previous;
+}
+
+// ==========================================
+// 記住上次的經手人與郵件類型（本機獨立鍵，不屬於紀錄資料，不含在備份內）
+// ==========================================
+const PREFS_KEY = 'meiho_mailroom_prefs_v1';
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(window.localStorage.getItem(PREFS_KEY));
+    if (p && typeof p === 'object' && !Array.isArray(p)) return p;
+  } catch (err) { /* 讀不到就當作沒有偏好 */ }
+  return {};
+}
+
+function savePrefs() {
+  try {
+    window.localStorage.setItem(PREFS_KEY, JSON.stringify({
+      mailType: dom.mailType.value,
+      handler: dom.handlerSelect.value,
+      handlerOther: dom.handlerSelect.value === HANDLER_OTHER ? dom.handlerOther.value.trim() : ''
+    }));
+  } catch (err) { /* 無法儲存時不影響登記 */ }
+}
+
+function setHandlerOtherVisible(show) {
+  dom.handlerOtherGroup.style.display = show ? 'flex' : 'none';
+  dom.handlerOther.required = show;
+}
+
+// 把記住的經手人與郵件類型套回登記表單（清單中已不存在的值就維持預設第一項）
+function applyPrefsToForm() {
+  const p = loadPrefs();
+  if (typeof p.mailType === 'string' && MAIL_TYPES.includes(p.mailType)) dom.mailType.value = p.mailType;
+  if (typeof p.handler === 'string' && (HANDLERS.includes(p.handler) || p.handler === HANDLER_OTHER)) {
+    dom.handlerSelect.value = p.handler;
+  }
+  const other = dom.handlerSelect.value === HANDLER_OTHER;
+  dom.handlerOther.value = other && typeof p.handlerOther === 'string' ? p.handlerOther : '';
+  setHandlerOtherVisible(other);
+}
+
+// ==========================================
+// 收件人自動完成（原生實作）：↑↓ 選擇、Enter 確認、Esc 關閉
+// 選定後自動帶入該收件人最近一次登記的單位（仍可手動修改）
+// ==========================================
+const AC_MAX_ITEMS = 8;
+const ac = { items: [], active: -1 };
+
+function acList() { return document.getElementById('recipientList'); }
+function acIsOpen() { return !acList().hidden; }
+
+function acClose() {
+  ac.items = [];
+  ac.active = -1;
+  acList().hidden = true;
+  acList().innerHTML = '';
+  dom.recipient.setAttribute('aria-expanded', 'false');
+  dom.recipient.removeAttribute('aria-activedescendant');
+}
+
+function acSetActive(i) {
+  ac.active = i;
+  Array.from(acList().children).forEach((li, idx) => {
+    li.classList.toggle('active', idx === i);
+    li.setAttribute('aria-selected', idx === i ? 'true' : 'false');
+  });
+  if (i >= 0) {
+    dom.recipient.setAttribute('aria-activedescendant', 'acItem' + i);
+    const li = acList().children[i];
+    if (li && li.scrollIntoView) li.scrollIntoView({ block: 'nearest' });
+  } else {
+    dom.recipient.removeAttribute('aria-activedescendant');
+  }
+}
+
+function acRender() {
+  const q = dom.recipient.value;
+  ac.items = MailBackupCore.suggestRecipients(records, q, AC_MAX_ITEMS);
+  // 只有一筆且與輸入完全相同、單位也已填好時，不需要再顯示建議
+  if (ac.items.length === 1 && ac.items[0].name === q.trim() && dom.department.value.trim()) ac.items = [];
+  const ul = acList();
+  ul.innerHTML = '';
+  if (ac.items.length === 0) { acClose(); return; }
+  ac.items.forEach((it, i) => {
+    const li = document.createElement('li');
+    li.id = 'acItem' + i;
+    li.className = 'ac-item';
+    li.setAttribute('role', 'option');
+    const name = document.createElement('span');
+    name.textContent = it.name;
+    const dept = document.createElement('span');
+    dept.className = 'ac-dept';
+    dept.textContent = it.department;
+    li.appendChild(name);
+    li.appendChild(dept);
+    li.addEventListener('mousedown', (e) => { e.preventDefault(); acChoose(i); });   // mousedown 避免輸入框先失焦
+    ul.appendChild(li);
+  });
+  ul.hidden = false;
+  dom.recipient.setAttribute('aria-expanded', 'true');
+  acSetActive(-1);
+}
+
+function acChoose(i) {
+  const it = ac.items[i];
+  if (!it) return;
+  dom.recipient.value = it.name;
+  if (it.department) dom.department.value = it.department;
+  acClose();
+}
+
+// 完整打出已登記過的姓名後直接離開欄位：單位仍是空的就帶入上一次的單位
+function acFillDeptIfExactMatch() {
+  const name = dom.recipient.value.trim();
+  if (!name || dom.department.value.trim()) return;
+  const hit = MailBackupCore.suggestRecipients(records, name, 50).find(s => s.name === name);
+  if (hit && hit.department) dom.department.value = hit.department;
+}
+
+function initRecipientAutocomplete() {
+  const input = dom.recipient;
+  input.addEventListener('input', (e) => {
+    if (e.isComposing) return;          // 輸入法組字中先不比對，組字結束再處理
+    acRender();
+  });
+  input.addEventListener('compositionend', acRender);
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;   // 輸入法選字用的按鍵，不攔截
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!acIsOpen()) {
+        if (e.key === 'ArrowDown' && input.value.trim()) { e.preventDefault(); acRender(); }
+        return;
+      }
+      e.preventDefault();
+      const n = ac.items.length;
+      const next = e.key === 'ArrowDown' ? (ac.active + 1) % n : (ac.active <= 0 ? n - 1 : ac.active - 1);
+      acSetActive(next);
+    } else if (e.key === 'Enter') {
+      if (acIsOpen() && ac.active >= 0) {   // 已用方向鍵選了項目：Enter 只做確認，不送出表單
+        e.preventDefault();
+        acChoose(ac.active);
+      } else if (acIsOpen()) {
+        acClose();                          // 有清單但沒選：照原本行為送出
+      }
+    } else if (e.key === 'Escape') {
+      if (acIsOpen()) { e.preventDefault(); e.stopPropagation(); acClose(); }
+    } else if (e.key === 'Tab') {
+      acClose();
+    }
+  });
+  input.addEventListener('blur', () => {
+    acClose();
+    acFillDeptIfExactMatch();
+  });
+}
 
 // 資料安全警示（持續顯示直到問題排除）
 const dataAlerts = { saveFail: null, corrupt: null, stale: null };
@@ -506,14 +806,23 @@ function bindEvents() {
     }
   });
 
+  initRecipientAutocomplete();
+
+  // 設定（經手人名單）
+  dom.btnOpenSettings.addEventListener('click', openSettingsModal);
+  dom.btnSettingsClose.addEventListener('click', closeSettingsModal);
+  dom.btnSettingsOk.addEventListener('click', closeSettingsModal);
+  dom.handlerAddForm.addEventListener('submit', onHandlerAdd);
+  dom.handlerList.addEventListener('click', onHandlerListClick);
+
   // 登記表單送出
   dom.form.addEventListener('submit', handleRegisterSubmit);
 
   // 清除重填
   dom.btnReset.addEventListener('click', () => {
     dom.form.reset();
-    dom.handlerOtherGroup.style.display = 'none';
-    dom.handlerOther.required = false;
+    clearTrackingHints();
+    applyPrefsToForm();   // 經手人與郵件類型回到上次記住的值
     dom.trackingNo.focus();
   });
 
@@ -622,6 +931,14 @@ function bindEvents() {
   // 簽收表單送出
   dom.quickSignForm.addEventListener('submit', handleSignConfirm);
 
+  // 單號提醒：輸入中清除舊提醒；離開欄位時檢查；「仍要存檔」確認重複後再送出
+  dom.trackingNo.addEventListener('input', clearTrackingHints);
+  dom.trackingNo.addEventListener('blur', onTrackingBlur);
+  document.getElementById('btnDupConfirm').addEventListener('click', () => {
+    dupWarnedKey = trackingKeyOf(dom.trackingNo.value);
+    dom.form.requestSubmit();
+  });
+
   // 條碼掃描槍支援：在編號輸入框按下 Enter 且非空白時，若已有其他欄位可自動跳到下個欄位
   dom.trackingNo.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -657,6 +974,47 @@ function readHandlerValue(selectEl, otherEl) {
   return name;
 }
 
+// ---- 單號欄位旁的提醒（錯誤 / 重複）----
+let dupWarnedKey = null;   // 已對這個單號提醒過重複；同一單號再送出一次才會存檔
+const trackingKeyOf = (v) => textOf(v).trim().toLowerCase();
+
+function showTrackingError(message) {
+  dom.trackingError.textContent = message;
+}
+function hideDupWarning() {
+  dom.trackingDup.hidden = true;
+  dom.trackingDupText.textContent = '';
+}
+function clearTrackingHints() {
+  showTrackingError('');
+  hideDupWarning();
+  dupWarnedKey = null;
+}
+
+// 找出重複：今天已登記過相同單號，或仍待領取的相同單號（沿用原本的防重複規則）
+function findTrackingDuplicate(trackingNo) {
+  const today = formatCurrentDateTime().slice(0, 10);
+  return MailBackupCore.findSameDayDuplicate(records, trackingNo, today)
+    || MailBackupCore.findPendingDuplicate(records, trackingNo);
+}
+
+function showDupWarning(dup) {
+  const status = dup.status === 'RECEIVED' ? '已領取' : '待領取';
+  dom.trackingDupText.textContent =
+    `⚠️ 此單號已於 ${textOf(dup.createdAt)} 登記給「${textOf(dup.recipient)}」（${status}）。`;
+  dom.trackingDup.hidden = false;
+}
+
+// 離開單號欄位時先行提醒（條碼槍刷入後 Enter 跳到下一欄時也會觸發）；不阻擋輸入
+function onTrackingBlur() {
+  if (!dom.trackingNo.value.trim()) { clearTrackingHints(); return; }
+  const v = validateTrackingNo(dom.trackingNo.value);
+  showTrackingError(v.ok ? '' : v.message);
+  if (!v.ok) { hideDupWarning(); return; }
+  const dup = findTrackingDuplicate(v.value);
+  if (dup) showDupWarning(dup); else hideDupWarning();
+}
+
 // 處理登記送出
 function handleRegisterSubmit(e) {
   e.preventDefault();
@@ -668,26 +1026,34 @@ function handleRegisterSubmit(e) {
     [dom.department, '收件人所屬單位']
   ])) return;
 
+  // 單號格式檢查：提醒顯示在欄位旁，不用彈窗，以免打斷連續登打
+  const tracking = validateTrackingNo(dom.trackingNo.value);
+  if (!tracking.ok) {
+    showTrackingError(tracking.message);
+    dom.trackingNo.focus();
+    dom.trackingNo.select();
+    return;
+  }
+  showTrackingError('');
+
   const handler = readHandlerValue(dom.handlerSelect, dom.handlerOther);
   if (handler === null) return;
 
-  const trackingNo = dom.trackingNo.value.trim();
+  const trackingNo = tracking.value;
   const mailType = dom.mailType.value;
   const sender = dom.sender.value.trim();
   const recipient = dom.recipient.value.trim();
   const department = dom.department.value.trim();
   const remark = dom.remark.value.trim();
 
-  // 防止重複刷條碼：相同編號且仍待領取的紀錄已存在時，先請使用者確認
-  const dup = MailBackupCore.findPendingDuplicate(records, trackingNo);
-  if (dup) {
-    const ok = confirm(
-      `此編號已於 ${textOf(dup.createdAt)} 登記給 ${textOf(dup.recipient)}（狀態：待領取），確定要再登記一次嗎？`);
-    if (!ok) {
-      dom.trackingNo.focus();
-      dom.trackingNo.select();
-      return;
-    }
+  // 重複單號：同一天已登記過，或仍待領取的相同單號。第一次送出只提醒，
+  // 再送出一次（再按 Enter 或按「仍要存檔」）才會存檔
+  const dup = findTrackingDuplicate(trackingNo);
+  if (dup && dupWarnedKey !== trackingKeyOf(trackingNo)) {
+    showDupWarning(dup);
+    dupWarnedKey = trackingKeyOf(trackingNo);
+    showToast('⚠️ 單號重複，請確認；若仍要存檔，再送出一次即可。', 'info');
+    return;
   }
 
   // 建立新資料物件
@@ -717,10 +1083,11 @@ function handleRegisterSubmit(e) {
   renderTable();
   updateStats();
 
-  // 清空表單並將焦點重新移至編號，方便連續登記
+  // 清空表單並將焦點重新移至編號，方便連續登記；下一筆沿用這一筆的經手人與郵件類型
+  savePrefs();
   dom.form.reset();
-  dom.handlerOtherGroup.style.display = 'none';
-  dom.handlerOther.required = false;
+  clearTrackingHints();
+  applyPrefsToForm();
   dom.trackingNo.focus();
 
   showToast(`✅ 已成功登記：【${recipient}】的${mailType}`, 'success');
@@ -1192,6 +1559,7 @@ function downloadBackupFile(filePrefix) {
     version: "1.0",
     backupTime: formatCurrentDateTime(),
     totalRecords: records.length,
+    handlers: HANDLERS.slice(),   // 選填欄位：經手人名單（舊版備份沒有此欄位，仍可還原）
     records: records
   };
 
@@ -1237,6 +1605,7 @@ function handleBackupFileSelect(e) {
       pendingRestoreData = {
         validation: validation,
         records: validation.records,
+        handlers: validation.handlers,   // null 代表備份檔沒有經手人名單
         fileName: file.name
       };
       openRestorePreview();
@@ -1420,6 +1789,14 @@ function executeRestore() {
 
   // 以重新讀取並驗證過的資料更新畫面
   records = result.records;
+  // 經手人名單：合併還原取聯集；完全覆蓋改用備份檔的名單。備份檔沒有名單時不更動
+  if (Array.isArray(pending.handlers) && pending.handlers.length > 0) {
+    HANDLERS = mode === 'replace'
+      ? pending.handlers.slice()
+      : MailBackupCore.mergeHandlers(HANDLERS, pending.handlers);
+    handlerStore.save(HANDLERS);
+    refreshHandlerSelects();
+  }
   dataAlerts.corrupt = null;   // 已成功還原並驗證，損毀警示解除
   dataAlerts.saveFail = null;
   renderDataAlerts();
@@ -1457,7 +1834,7 @@ function loadSampleData() {
       sender: '教育部高等教育司',
       recipient: '校長室 秘書',
       department: '校長室',
-      handler: '魏啟軒',
+      handler: '經手人B',
       remark: '公文專件',
       createdAt: timeMinusMins(25),
       status: 'PENDING',
@@ -1471,7 +1848,7 @@ function loadSampleData() {
       sender: '屏東縣衛生局',
       recipient: '李主任',
       department: '護理系',
-      handler: '陳銘鴻',
+      handler: '經手人A',
       remark: '教學實驗器材',
       createdAt: timeMinusMins(60),
       status: 'PENDING',
@@ -1485,7 +1862,7 @@ function loadSampleData() {
       sender: '日本東京大學醫學院',
       recipient: '陳教授',
       department: '醫學檢驗生物技術系',
-      handler: '魏啟軒',
+      handler: '經手人B',
       remark: '學術論文審查原件',
       createdAt: timeMinusMins(140),
       status: 'RECEIVED',
@@ -1499,7 +1876,7 @@ function loadSampleData() {
       sender: '考選部',
       recipient: '註冊組組長',
       department: '教務處',
-      handler: '陳銘鴻',
+      handler: '經手人A',
       remark: '重要考試通知',
       createdAt: timeMinusMins(180),
       status: 'PENDING',
@@ -1513,7 +1890,7 @@ function loadSampleData() {
       sender: 'Amazon Japan',
       recipient: '張組長',
       department: '總務處保管組',
-      handler: '魏啟軒',
+      handler: '經手人B',
       remark: '採購圖書資料',
       createdAt: timeMinusMins(300),
       status: 'RECEIVED',
@@ -1527,7 +1904,7 @@ function loadSampleData() {
       sender: '黑貓宅急便 (三民書局)',
       recipient: '王教授',
       department: '幼兒保育系',
-      handler: '陳銘鴻',
+      handler: '經手人A',
       remark: '教材樣書',
       createdAt: timeMinusMins(15),
       status: 'PENDING',

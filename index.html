@@ -100,6 +100,11 @@
               </svg>
               <input type="text" id="trackingNo" name="trackingNo" placeholder="請輸入或刷入編號 (例如: 9812345678)" required autofocus>
             </div>
+            <div class="field-hint field-hint-error" id="trackingError" role="alert"></div>
+            <div class="field-hint field-hint-warn" id="trackingDup" role="alert" hidden>
+              <span id="trackingDupText"></span>
+              <button type="button" class="btn btn-outline btn-sm" id="btnDupConfirm">仍要存檔</button>
+            </div>
           </div>
 
           <!-- 郵件類型 -->
@@ -133,7 +138,11 @@
           <!-- 收件人 -->
           <div class="form-group">
             <label for="recipient" class="required">收件人</label>
-            <input type="text" id="recipient" name="recipient" placeholder="例：王小明 老師/教職員/同學" required>
+            <div class="ac-wrap">
+              <input type="text" id="recipient" name="recipient" placeholder="例：王小明 老師/教職員/同學" required
+                     role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="recipientList">
+              <ul class="ac-list" id="recipientList" role="listbox" hidden></ul>
+            </div>
           </div>
 
           <!-- 收件人所屬單位 (手動輸入) -->
@@ -240,6 +249,13 @@
               <polyline points="9 12 11 14 15 10"></polyline>
             </svg>
             資料檢查
+          </button>
+          <button type="button" class="btn btn-outline" id="btnOpenSettings" title="設定經手人名單（存於本機）">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            設定
           </button>
           <input type="file" id="backupFileInput" accept=".json" style="display: none;">
           <button type="button" class="btn btn-outline" id="btnPrint" title="列印目前顯示清單">
@@ -697,6 +713,31 @@
           </svg>
           立即列印 A4 簽收表 (Ctrl + P)
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 設定 Modal：經手人名單 -->
+  <div class="modal-overlay" id="settingsModal" style="display: none;">
+    <div class="modal-container modal-sm">
+      <div class="modal-header">
+        <h3 class="modal-title">設定：經手人名單</h3>
+        <button type="button" class="modal-close" id="btnSettingsClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <ul class="handler-list" id="handlerList"></ul>
+        <form id="handlerAddForm" class="handler-add-form" autocomplete="off">
+          <label for="handlerAddInput">新增經手人</label>
+          <div class="handler-add-row">
+            <input type="text" id="handlerAddInput" maxlength="30" placeholder="輸入姓名後按 Enter">
+            <button type="submit" class="btn btn-primary btn-sm">新增</button>
+          </div>
+          <div class="field-hint field-hint-error" id="handlerAddError" role="alert"></div>
+        </form>
+        <div class="restore-note">🔒 名單只存在這台電腦的瀏覽器中，會包含在「完整備份」裡。刪除名單中的人，不會更動過去的登記紀錄。</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btnSettingsOk">關閉</button>
       </div>
     </div>
   </div>

@@ -1225,3 +1225,21 @@ select:focus {
   size: A4 portrait;
   margin: 12mm 15mm;
 }
+
+/* ===== 設定：經手人名單 / 欄位提示 ===== */
+.handler-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.handler-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: var(--radius-sm); background: #f9fafb; }
+.handler-add-form label { font-size: 0.9rem; font-weight: 600; color: #374151; display: block; margin-bottom: 6px; }
+.handler-add-row { display: flex; gap: 8px; }
+.field-hint { font-size: 0.85rem; margin-top: 4px; }
+.field-hint:empty { display: none; }
+.field-hint-error { color: #b91c1c; }
+.field-hint-warn { color: #92400e; background: #fffbeb; border: 1px solid #fcd34d; border-radius: var(--radius-sm); padding: 6px 10px; }
+
+/* ===== 收件人自動完成 ===== */
+.ac-wrap { position: relative; }
+.ac-list { position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 50; margin: 0; padding: 4px 0; list-style: none; background: #ffffff; border: 1.5px solid var(--peacock-primary); border-radius: var(--radius-sm); box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12); max-height: 280px; overflow-y: auto; }
+.ac-list[hidden] { display: none; }
+.ac-item { display: flex; justify-content: space-between; gap: 12px; padding: 7px 12px; cursor: pointer; font-size: 0.95rem; }
+.ac-item .ac-dept { color: #6b7280; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-item.active, .ac-item:hover { background: #e6f7f5; }

@@ -243,7 +243,8 @@
     const warnings = [];
     const result = {
       ok: false, format: 'unknown', version: null, backupTime: null,
-      declaredTotal: null, recordCount: 0, errors, warnings, integrity: null, records: null
+      declaredTotal: null, recordCount: 0, errors, warnings, integrity: null, records: null,
+      handlers: null
     };
     const fail = (code, message) => errors.push({ code, message });
     const warn = (code, message) => warnings.push({ code, message });
@@ -316,6 +317,11 @@
     }
 
     result.recordCount = records.length;
+
+    // 經手人名單（選填；舊備份沒有此欄位，還原時不會動到現有名單）
+    if (result.format === 'versioned' && Array.isArray(parsed.handlers)) {
+      result.handlers = normalizeHandlers(parsed.handlers);
+    }
 
     // 致命的紀錄錯誤
     records.forEach((r, i) => {
@@ -786,6 +792,18 @@
     return null;
   }
 
+  // 同一天（dayStr 為 YYYY-MM-DD）內已登記過相同編號的紀錄（不分領取狀態、不分大小寫）；沒有則回傳 null
+  function findSameDayDuplicate(records, trackingNo, dayStr) {
+    const t = String(trackingNo === null || trackingNo === undefined ? '' : trackingNo).trim().toLowerCase();
+    if (!t || !dayStr || !Array.isArray(records)) return null;
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      if (!isRec(r) || typeof r.createdAt !== 'string' || r.createdAt.slice(0, 10) !== dayStr) continue;
+      if (String(r.trackingNo === undefined || r.trackingNo === null ? '' : r.trackingNo).trim().toLowerCase() === t) return r;
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------------
   // 分頁（收件摘要圖片：每張圖最多 N 筆）
   // ---------------------------------------------------------------
@@ -821,7 +839,112 @@
     return true;
   }
 
+  // ---------------------------------------------------------------
+  // 經手人名單（存於獨立鍵，不屬於紀錄陣列，不改變紀錄格式）
+  // ---------------------------------------------------------------
+  const HANDLERS_KEY = 'meiho_mailroom_handlers_v1';
+  const HANDLER_OTHER_LABEL = '其他';   // 下拉選單保留字，不可當作經手人姓名
+  const HANDLER_MAX_LENGTH = 30;
+
+  // 正規化名單：只留字串、去前後空白、去重、排除空白與保留字，並限制長度
+  function normalizeHandlers(list) {
+    const out = [];
+    if (!Array.isArray(list)) return out;
+    list.forEach(v => {
+      if (typeof v !== 'string') return;
+      const name = v.trim();
+      if (!name || name === HANDLER_OTHER_LABEL || name.length > HANDLER_MAX_LENGTH) return;
+      if (out.indexOf(name) === -1) out.push(name);
+    });
+    return out;
+  }
+
+  // 由既有紀錄的 handler 欄位產生名單（依出現次數多到少；次數相同者依首次出現順序）
+  function handlersFromRecords(records) {
+    const counts = new Map();
+    (Array.isArray(records) ? records : []).forEach(r => {
+      if (!isRec(r) || typeof r.handler !== 'string') return;
+      const name = r.handler.trim();
+      if (name) counts.set(name, (counts.get(name) || 0) + 1);
+    });
+    const names = Array.from(counts.keys());
+    names.sort((a, b) => counts.get(b) - counts.get(a));   // Array.sort 為穩定排序
+    return normalizeHandlers(names);
+  }
+
+  // 聯集（保留 a 的順序，再接上 b 中沒有的）
+  function mergeHandlers(a, b) {
+    return normalizeHandlers([].concat(normalizeHandlers(a), normalizeHandlers(b)));
+  }
+
+  /**
+   * 經手人名單儲存。load() 回傳 { list, exists }：
+   * exists=false 代表從未儲存過（呼叫端可依既有紀錄產生初始名單）。所有方法不拋例外。
+   */
+  function createHandlerStore(options) {
+    const storage = options.storage;
+    const key = options.key || HANDLERS_KEY;
+    function load() {
+      try {
+        const raw = storage.getItem(key);
+        if (raw === null || raw === undefined || raw === '') return { list: [], exists: false };
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return { list: [], exists: false };
+        return { list: normalizeHandlers(parsed), exists: true };
+      } catch (err) {
+        return { list: [], exists: false };
+      }
+    }
+    function save(list) {
+      try {
+        storage.setItem(key, JSON.stringify(normalizeHandlers(list)));
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+    return { load, save, key };
+  }
+
+  // ---------------------------------------------------------------
+  // 收件人自動完成：由歷史紀錄比對（純函式，不修改傳入資料）
+  // ---------------------------------------------------------------
+  function toText(v) { return v === null || v === undefined ? '' : String(v); }
+
+  /**
+   * 依輸入文字找出過去登記過的收件人。姓名「包含」輸入文字即符合（不分大小寫）。
+   * 每位收件人帶出「最近一次登記」的單位。排序：開頭符合 → 登記次數多 → 最近使用。
+   * 回傳 [{ name, department, count }]，最多 limit 筆。
+   */
+  function suggestRecipients(records, query, limit) {
+    const q = toText(query).trim().toLowerCase();
+    if (!q || !Array.isArray(records)) return [];
+    const byName = new Map();
+    records.forEach(r => {
+      if (!isRec(r)) return;
+      const name = toText(r.recipient).trim();
+      if (!name || name.toLowerCase().indexOf(q) === -1) return;
+      const at = toText(r.createdAt);
+      const e = byName.get(name);
+      if (!e) {
+        byName.set(name, { name, department: toText(r.department).trim(), count: 1, last: at });
+      } else {
+        e.count += 1;
+        if (at >= e.last) { e.last = at; e.department = toText(r.department).trim(); }
+      }
+    });
+    const list = Array.from(byName.values());
+    const starts = (e) => (e.name.toLowerCase().indexOf(q) === 0 ? 0 : 1);
+    list.sort((a, b) =>
+      (starts(a) - starts(b)) || (b.count - a.count) || b.last.localeCompare(a.last) || a.name.localeCompare(b.name));
+    return list.slice(0, Math.max(1, limit | 0 || 8)).map(e => ({ name: e.name, department: e.department, count: e.count }));
+  }
+
   const api = {
+    findSameDayDuplicate,
+    suggestRecipients,
+    HANDLERS_KEY, HANDLER_OTHER_LABEL, HANDLER_MAX_LENGTH,
+    normalizeHandlers, handlersFromRecords, mergeHandlers, createHandlerStore,
     ensureUniqueIds, toCsvField, toCsvTextFormula, findPendingDuplicate, paginate,
     diffFields, appendHistory, TRACKED_FIELDS,
     STORAGE_KEY, createStore,
