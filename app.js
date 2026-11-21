@@ -2099,8 +2099,8 @@ function changeSummaryPage(delta) {
 async function ensureFontsReady() {
   if (!document.fonts || !document.fonts.load) return;
   const wait = Promise.all([
-    document.fonts.load('bold 28px "Noto Sans TC"', '美和收件人'),
-    document.fonts.load('500 18px "Noto Sans TC"', '美和收件人'),
+    document.fonts.load('bold 28px "Microsoft JhengHei"', '美和收件人'),
+    document.fonts.load('500 18px "Microsoft JhengHei"', '美和收件人'),
     document.fonts.ready
   ]).catch(() => {});
   await Promise.race([wait, new Promise(resolve => setTimeout(resolve, 3000))]);
@@ -2159,7 +2159,7 @@ async function renderSummaryCanvas() {
   if (token !== summaryRenderToken) return;   // 期間又有新的繪製請求，放棄這一次
 
   const ctx = canvas.getContext('2d');
-  const FONT = '"Noto Sans TC", "Microsoft JhengHei", sans-serif';
+  const FONT = '"Microsoft JhengHei", sans-serif';
 
   // 製表人：以「整個篩選結果」中經手次數最多者；若篩選結果為空，改看該日期全部登記
   let dominantHandler = dominantHandlerOf(summary.items);
