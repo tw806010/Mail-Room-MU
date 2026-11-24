@@ -792,6 +792,46 @@ function renderBackupStatus() {
   document.getElementById('backupStatusDetail').textContent = last;
 }
 
+// 「更多功能」工具列下拉選單：展開／收合（點選項目、外部、Escape 時關閉）
+function initToolbarMoreMenu() {
+  const btnMore = document.getElementById('btnToolbarMore');
+  const menu = document.getElementById('toolbarMoreMenu');
+  const wrap = btnMore && btnMore.closest('.toolbar-more');
+  if (!btnMore || !menu || !wrap) return;
+
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    btnMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+
+  const closeMenu = () => setOpen(false);
+  const isOpen = () => btnMore.getAttribute('aria-expanded') === 'true';
+
+  btnMore.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!isOpen());
+  });
+
+  // 點選選單項目後收合；延遲關閉以確保「還原備份」仍能觸發 file input 選檔
+  menu.addEventListener('click', (e) => {
+    if (e.target.closest('.toolbar-more-item')) {
+      setTimeout(closeMenu, 0);
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!isOpen()) return;
+    if (!wrap.contains(e.target)) closeMenu();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isOpen()) {
+      closeMenu();
+      btnMore.focus();
+    }
+  });
+}
+
 // 綁定事件監聽
 function bindEvents() {
   // 經手人下拉連動手動輸入 (登記表單)
@@ -835,10 +875,13 @@ function bindEvents() {
   dom.filterStatus.addEventListener('change', renderTable);
   dom.filterDate.addEventListener('change', renderTable);
 
+  // 「更多功能」下拉選單（列印／匯出／備份等進階功能）
+  initToolbarMoreMenu();
+
   // 匯出 CSV
   dom.btnExportCsv.addEventListener('click', exportToCsv);
 
-  // 儲存收件摘要按鈕
+  // 產生待領公告圖按鈕
   dom.btnOpenSummaryModal.addEventListener('click', openSummaryModal);
   dom.btnSummaryClose.addEventListener('click', closeSummaryModal);
   dom.btnSummaryCancel.addEventListener('click', closeSummaryModal);
@@ -2360,7 +2403,7 @@ function downloadSummaryImage() {
   link.click();
   document.body.removeChild(link);
 
-  showToast(`🖼️ 收件摘要圖片已成功儲存為：${fileName}`, 'success');
+  showToast(`🖼️ 待領公告圖已成功儲存為：${fileName}`, 'success');
 }
 
 // 複製摘要圖片到剪貼簿
@@ -2381,7 +2424,7 @@ function copySummaryImage() {
     navigator.clipboard.write([
       new ClipboardItem({ 'image/png': blob })
     ]).then(() => {
-      showToast('📋 收件摘要圖片已成功複製至剪貼簿！可直接於 LINE 或 Word 中貼上 (Ctrl+V)。', 'success');
+      showToast('📋 待領公告圖已成功複製至剪貼簿！可直接於 LINE 或 Word 中貼上 (Ctrl+V)。', 'success');
     }).catch(err => {
       console.error('複製圖片失敗：', err);
       showToast('複製圖片失敗，請直接點選「下載圖片」儲存！', 'info');

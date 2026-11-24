@@ -418,16 +418,89 @@ select:focus {
   font-size: 0.825rem;
 }
 
+/* 清單卡片：允許工具列下拉選單溢出，避免筆數少時被 .card overflow 裁切 */
+.list-card {
+  overflow: visible;
+}
+
+.list-card .list-toolbar-header {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
 /* 工具列與篩選列 */
 .list-toolbar-header {
   background: #ffffff;
   border-bottom: 1px solid var(--border-color);
+  position: relative;
+  z-index: 40;
 }
 
 .action-buttons {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
+  position: relative;
+}
+
+/* 「更多功能」下拉選單：高於表格／篩選列，低於 .modal-overlay (1000) */
+.toolbar-more {
+  position: relative;
+}
+
+.toolbar-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 2rem));
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid var(--peacock-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toolbar-more-menu[hidden] {
+  display: none;
+}
+
+.toolbar-more-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--peacock-primary-dark);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toolbar-more-item:hover,
+.toolbar-more-item:focus-visible {
+  background: var(--peacock-surface);
+  outline: none;
+}
+
+.toolbar-more-item svg {
+  flex-shrink: 0;
+  color: var(--peacock-primary);
+}
+
+.toolbar-more-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-color);
 }
 
 .filter-bar {
